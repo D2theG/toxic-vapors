@@ -1,0 +1,2082 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'NIST 800-53 Full Demo: Explicit Route Dependencies for TGW Attachments, EKS 1.32, FortiGate 3-ENI, Dual-Stack Spoke 3, and Comprehensive TGW/VPC Flow Log Ingestion.'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: 'fed-cortex-demo'
+
+  KubernetesVersion:
+    Type: String
+    Default: '1.32'
+    Description: 'Kubernetes version for Amazon EKS.'
+
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64'
+
+  WindowsAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
+
+  FortiGateAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/marketplace/prod-6oyufhmqih7iy/8.0.2'
+    Description: 'FortiGate-VM64 AMI resolved dynamically across all regions via AWS Marketplace SSM alias.'
+
+  FortiGateInstanceType:
+    Type: String
+    Default: 'c5.xlarge'
+    Description: 'Instance type for FortiGate-VM (c5.xlarge supports up to 4 ENIs).'
+
+  BrokerVmAmiId:
+    Type: String
+    Description: "AMI ID for the Cortex Broker VM. Leave as 'none' on initial deployment until the AMI is imported."
+    Default: "ami-0a4b36508c194cb0a"
+
+  DeployDualStackSpoke:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: "Deploy dual-stack IPv4/IPv6 Spoke 3 with Linux and Windows test hosts"
+
+  Spoke3VpcCidr:
+    Type: String
+    Default: "10.103.0.0/16"
+    Description: "IPv4 CIDR block for Spoke 3 Dual-Stack VPC"
+
+  Spoke3SubnetACidr:
+    Type: String
+    Default: "10.103.1.0/24"
+    Description: "IPv4 Subnet CIDR for Spoke 3 Subnet A"
+
+  FlowLogsReaderRoleArn:
+    Type: String
+    Default: ""
+    Description: "Optional ARN of the IAM Role (e.g. Cortex XSIAM / XDR collection role) granted permissions to read Flow Logs from S3 and SQS. Leave blank if not yet configured."
+
+  CortexExternalId:
+    Type: String
+    Default: "4F6A2C18-7B8D-4F1E-9C33-89B72F4C5E01" # Replace with your generated UUID
+    Description: "External ID shared with Palo Alto Cortex to prevent confused-deputy attacks."
+
+  CortexAccountId:
+    Type: String
+    Default: "006742885340"
+    Description: "Palo Alto Networks AWS Account ID (006742885340 for commercial, 685269782068 for FedRAMP)."
+
+
+Conditions:
+  DeployBrokerVM: !Not [!Equals [!Ref BrokerVmAmiId, "none"]]
+  ShouldDeployDualStackSpoke: !Equals [!Ref DeployDualStackSpoke, "true"]
+  HasFlowLogsReaderRole: !Not [!Equals [!Ref FlowLogsReaderRoleArn, ""]]
+
+Resources:
+  # =========================================================================
+  # 1. AWS TRANSIT GATEWAY & CENTRALIZED LOGGING PIPELINES
+  # =========================================================================
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
+    Properties:
+      AutoAcceptSharedAttachments: enable
+      DefaultRouteTableAssociation: disable
+      DefaultRouteTablePropagation: disable
+      DnsSupport: enable
+      VpnEcmpSupport: enable
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-tgw"
+
+  TransitGatewayRouteTable:
+    Type: AWS::EC2::TransitGatewayRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-tgw-rt"
+
+  # =========================================================================
+  # 1A. CORTEX XSIAM INGESTION ROLE (CROSS-ACCOUNT / TELEMETRY CONSUMER)
+  # =========================================================================
+  CortexFlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${CortexAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref CortexExternalId
+      Policies:
+        - PolicyName: CortexFlowLogsIngestionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: S3FlowAndDNSLogsReadAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}/*"
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}/*"
+              - Sid: SQSFlowAndDNSLogsConsumeAccess
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                Resource:
+                  - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${EnvironmentName}-flowlogs-queue"
+                  - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${EnvironmentName}-dnslogs-queue"
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-cortex-flowlogs-role"
+
+  # =========================================================================
+  # 1B. NETWORK FLOW LOGS PIPELINE (VPC & TGW -> S3 -> SQS)
+  # =========================================================================
+  FlowLogsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${EnvironmentName}-flowlogs-queue"
+      MessageRetentionPeriod: 1209600 # 14 days
+      VisibilityTimeout: 300
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-flowlogs-queue"
+
+  FlowLogsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref FlowLogsQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3BucketToPublishFlowLogEvents
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt FlowLogsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+
+  FlowLogBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - FlowLogsQueuePolicy
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-flowlogs-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Queue: !GetAtt FlowLogsQueue.Arn
+
+  FlowLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FlowLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+          - Sid: AWSLogDeliveryCheck
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action:
+              - 's3:GetBucketAcl'
+              - 's3:ListBucket'
+            Resource: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+          - !If
+            - HasFlowLogsReaderRole
+            - Sid: AllowFlowLogsReaderRoleS3Access
+              Effect: Allow
+              Principal:
+                AWS: !Ref FlowLogsReaderRoleArn
+              Action:
+                - 's3:GetObject'
+                - 's3:ListBucket'
+                - 's3:GetBucketLocation'
+              Resource:
+                - !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+                - !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}/*"
+            - !Ref "AWS::NoValue"
+
+  # --- Flow Log Collectors (TGW & VPCs) ---
+  TransitGatewayFlowLog:
+    Type: AWS::EC2::FlowLog
+    DependsOn: FlowLogBucketPolicy
+    Properties:
+      ResourceType: 'TransitGateway'
+      ResourceId: !Ref TransitGateway
+      LogDestinationType: 's3'
+      LogDestination: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+      MaxAggregationInterval: 60
+
+  SecurityVPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    DependsOn: FlowLogBucketPolicy
+    Properties:
+      ResourceType: 'VPC'
+      ResourceId: !Ref SecurityVPC
+      TrafficType: ALL
+      LogDestinationType: 's3'
+      LogDestination: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+      MaxAggregationInterval: 60
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-security-vpc-flowlog"
+
+  Spoke1VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    DependsOn: FlowLogBucketPolicy
+    Properties:
+      ResourceType: 'VPC'
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+      LogDestinationType: 's3'
+      LogDestination: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+      MaxAggregationInterval: 60
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke1-vpc-flowlog"
+
+  Spoke2VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    DependsOn: FlowLogBucketPolicy
+    Properties:
+      ResourceType: 'VPC'
+      ResourceId: !Ref Workload2VPC
+      TrafficType: ALL
+      LogDestinationType: 's3'
+      LogDestination: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+      MaxAggregationInterval: 60
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke2-vpc-flowlog"
+
+  Spoke3VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: FlowLogBucketPolicy
+    Properties:
+      ResourceType: 'VPC'
+      ResourceId: !Ref Spoke3VPC
+      TrafficType: ALL
+      LogDestinationType: 's3'
+      LogDestination: !Sub "arn:aws:s3:::${EnvironmentName}-flowlogs-${AWS::AccountId}"
+      MaxAggregationInterval: 60
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke3-vpc-flowlog"
+
+  # =========================================================================
+  # 1C. ROUTE 53 DNS QUERY LOGS PIPELINE (DEDICATED S3 + SQS)
+  # =========================================================================
+  DNSLogsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${EnvironmentName}-dnslogs-queue"
+      MessageRetentionPeriod: 1209600 # 14 days
+      VisibilityTimeout: 300
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-dnslogs-queue"
+
+  DNSLogsQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref DNSLogsQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowS3BucketToPublishDNSLogEvents
+            Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt DNSLogsQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}"
+
+  DNSLogBucket:
+    Type: AWS::S3::Bucket
+    DependsOn:
+      - DNSLogsQueuePolicy
+    Properties:
+      BucketName: !Sub "${EnvironmentName}-dnslogs-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: 's3:ObjectCreated:*'
+            Queue: !GetAtt DNSLogsQueue.Arn
+
+  DNSLogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DNSLogBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSLogDeliveryWrite
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action: 's3:PutObject'
+            Resource: !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': 'bucket-owner-full-control'
+          - Sid: AWSLogDeliveryCheck
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Action:
+              - 's3:GetBucketAcl'
+              - 's3:ListBucket'
+            Resource: !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}"
+          - !If
+            - HasFlowLogsReaderRole
+            - Sid: AllowFlowLogsReaderRoleDNSAccess
+              Effect: Allow
+              Principal:
+                AWS: !Ref FlowLogsReaderRoleArn
+              Action:
+                - 's3:GetObject'
+                - 's3:ListBucket'
+                - 's3:GetBucketLocation'
+              Resource:
+                - !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}"
+                - !Sub "arn:aws:s3:::${EnvironmentName}-dnslogs-${AWS::AccountId}/*"
+            - !Ref "AWS::NoValue"
+
+  # --- Route 53 Resolver Query Logging & Associations ---
+  ResolverQueryLoggingConfig:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfig
+    DependsOn: DNSLogBucketPolicy
+    Properties:
+      Name: !Sub "${EnvironmentName}-resolver-query-logs"
+      DestinationArn: !GetAtt DNSLogBucket.Arn
+
+  SecurityVPCQueryLogAssoc:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Properties:
+      ResolverQueryLogConfigId: !GetAtt ResolverQueryLoggingConfig.Id
+      ResourceId: !Ref SecurityVPC
+
+  Spoke1VPCQueryLogAssoc:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Properties:
+      ResolverQueryLogConfigId: !GetAtt ResolverQueryLoggingConfig.Id
+      ResourceId: !Ref VPC
+
+  Spoke2VPCQueryLogAssoc:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Properties:
+      ResolverQueryLogConfigId: !GetAtt ResolverQueryLoggingConfig.Id
+      ResourceId: !Ref Workload2VPC
+
+  Spoke3VPCQueryLogAssoc:
+    Type: AWS::Route53Resolver::ResolverQueryLoggingConfigAssociation
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      ResolverQueryLogConfigId: !GetAtt ResolverQueryLoggingConfig.Id
+      ResourceId: !Ref Spoke3VPC
+
+
+  # =========================================================================
+  # 2. SECURITY SERVICES / INSPECTION VPC (10.200.0.0/16)
+  # =========================================================================
+  SecurityVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.200.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-security-vpc"
+
+  SecurityIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-security-igw"
+
+  SecurityVPCIGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SecurityVPC
+      InternetGatewayId: !Ref SecurityIGW
+
+  SecurityPublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: 10.200.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-public-wan-port1"
+
+  SecurityPrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: 10.200.2.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-private-lan-port2"
+
+  SecurityManagementSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: 10.200.3.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-mgmt-port3"
+
+  SecurityTGWSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: 10.200.10.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-tgw-subnet-a"
+
+  SecurityTGWSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref SecurityVPC
+      CidrBlock: 10.200.11.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-tgw-subnet-b"
+
+  SecurityPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-wan-rt"
+
+  SecurityPublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: SecurityVPCIGWAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref SecurityIGW
+
+  SecurityPublicSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityPublicSubnetA
+      RouteTableId: !Ref SecurityPublicRouteTable
+
+  SecurityPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-lan-rt"
+
+  SecurityPrivateWorkload1Route:
+    Type: AWS::EC2::Route
+    DependsOn: SecurityTGWAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPrivateRouteTable
+      DestinationCidrBlock: 10.100.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityPrivateWorkload2Route:
+    Type: AWS::EC2::Route
+    DependsOn: SecurityTGWAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPrivateRouteTable
+      DestinationCidrBlock: 10.150.0.0/16
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityPrivateWorkload3Route:
+    Type: AWS::EC2::Route
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: SecurityTGWAttachment
+    Properties:
+      RouteTableId: !Ref SecurityPrivateRouteTable
+      DestinationCidrBlock: !Ref Spoke3VpcCidr
+      TransitGatewayId: !Ref TransitGateway
+
+  SecurityPrivateSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityPrivateSubnetA
+      RouteTableId: !Ref SecurityPrivateRouteTable
+
+  SecurityManagementRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-mgmt-rt"
+
+  SecurityManagementDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: SecurityVPCIGWAttachment
+    Properties:
+      RouteTableId: !Ref SecurityManagementRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref SecurityIGW
+
+  SecurityManagementSubnetRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityManagementSubnetA
+      RouteTableId: !Ref SecurityManagementRouteTable
+
+  SecurityTGWRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SecurityVPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-tgw-rt"
+
+  SecurityTGWDefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref SecurityTGWRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NetworkInterfaceId: !Ref FortiGatePort2ENI
+
+  SecurityTGWManagementSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref SecurityTGWRouteTable
+      DestinationCidrBlock: 10.200.3.0/24
+      NetworkInterfaceId: !Ref FortiGatePort2ENI
+
+  SecurityTGWSubnetRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityTGWSubnetA
+      RouteTableId: !Ref SecurityTGWRouteTable
+
+  SecurityTGWSubnetRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SecurityTGWSubnetB
+      RouteTableId: !Ref SecurityTGWRouteTable
+
+  SecurityTGWAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref SecurityVPC
+      SubnetIds:
+        - !Ref SecurityTGWSubnetA
+        - !Ref SecurityTGWSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-sec-tgw-attach"
+
+  # =========================================================================
+  # 3. FORTINET FORTIGATE-VM (3 ENIs)
+  # =========================================================================
+  FortiGatePublicSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "FortiGate WAN Data Security Group"
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  FortiGatePrivateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "FortiGate LAN Data Security Group"
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 10.0.0.0/8
+
+  FortiGateManagementSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "FortiGate Out-of-band MGMT & Syslog Security Group"
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: 10.0.0.0/8
+
+  FortiGatePort1ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref SecurityPublicSubnetA
+      Description: "FortiGate Port1 WAN Interface"
+      GroupSet:
+        - !Ref FortiGatePublicSG
+      SourceDestCheck: false
+
+  FortiGatePort2ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref SecurityPrivateSubnetA
+      Description: "FortiGate Port2 LAN Interface"
+      GroupSet:
+        - !Ref FortiGatePrivateSG
+      SourceDestCheck: false
+
+  FortiGatePort3ENI:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      SubnetId: !Ref SecurityManagementSubnetA
+      Description: "FortiGate Port3 Out-of-Band MGMT Interface"
+      GroupSet:
+        - !Ref FortiGateManagementSG
+      SourceDestCheck: false
+
+  FortiGatePublicEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  FortiGateEIPAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt FortiGatePublicEIP.AllocationId
+      NetworkInterfaceId: !Ref FortiGatePort1ENI
+
+  FortiGateMgmtEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  FortiGateMgmtEIPAssoc:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt FortiGateMgmtEIP.AllocationId
+      NetworkInterfaceId: !Ref FortiGatePort3ENI
+
+  FortiGateInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref FortiGateInstanceType
+      ImageId: !Ref FortiGateAmiId
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-fortigate-ngfw"
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref FortiGatePort1ENI
+          DeviceIndex: 0
+        - NetworkInterfaceId: !Ref FortiGatePort2ENI
+          DeviceIndex: 1
+        - NetworkInterfaceId: !Ref FortiGatePort3ENI
+          DeviceIndex: 2
+      UserData:
+        Fn::Base64: !Sub |
+          Content-Type: multipart/mixed; boundary="==FORTIGATE=="
+          MIME-Version: 1.0
+
+          --==FORTIGATE==
+          Content-Type: text/plain; charset="us-ascii"
+          MIME-Version: 1.0
+          Content-Transfer-Encoding: 7bit
+          Content-Disposition: attachment; filename="config"
+
+          config system global
+              set hostname "${EnvironmentName}-fortigate"
+              set admintimeout 30
+          end
+          config system interface
+              edit "port1"
+                  set mode dhcp
+                  set allowaccess ping
+                  set alias "WAN"
+              next
+              edit "port2"
+                  set mode dhcp
+                  set defaultgw disable
+                  set allowaccess ping
+                  set alias "LAN"
+              next
+              edit "port3"
+                  set mode dhcp
+                  set defaultgw disable
+                  set allowaccess ping https ssh
+                  set alias "MGMT"
+              next
+          end
+          config system dedicated-mgmt
+              set status enable
+              set interface "port3"
+              set default-gateway 10.200.3.1
+          end
+          config router static
+              edit 1
+                  set dst 10.100.0.0/16
+                  set gateway 10.200.2.1
+                  set device "port2"
+              next
+              edit 2
+                  set dst 10.150.0.0/16
+                  set gateway 10.200.2.1
+                  set device "port2"
+              next
+              edit 3
+                  set dst 10.103.0.0/16
+                  set gateway 10.200.2.1
+                  set device "port2"
+              next
+          end
+          config firewall policy
+              edit 1
+                  set name "Egress-Workloads-To-Internet"
+                  set srcintf "port2"
+                  set dstintf "port1"
+                  set srcaddr "all"
+                  set dstaddr "all"
+                  set action accept
+                  set schedule "always"
+                  set service "ALL"
+                  set utm-status enable
+                  set nat enable
+              next
+              edit 2
+                  set name "sec-private-lan-port2 to sec-private-lan-port2"
+                  set srcintf "port2"
+                  set dstintf "port2"
+                  set action accept
+                  set srcaddr "all"
+                  set dstaddr "all"
+                  set schedule "always"
+                  set service "ALL"
+                  set logtraffic all
+                  set nat enable
+              next
+              edit 3
+                  set name "sec-private-lan-port2 to sec-mgmt-port3"
+                  set srcintf "port2"
+                  set dstintf "port3"
+                  set action accept
+                  set srcaddr "all"
+                  set dstaddr "all"
+                  set schedule "always"
+                  set service "ALL"
+                  set logtraffic all
+                  set nat enable
+              next
+          end
+          --==FORTIGATE==--
+
+  # =========================================================================
+  # 4. WORKLOAD SPOKE 1 VPC (10.100.0.0/16 - App & EKS)
+  # =========================================================================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.100.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-workload-spoke1-vpc"
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.100.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke1-subnet-a"
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.100.2.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke1-subnet-b"
+
+  WorkloadTGWAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VPC
+      SubnetIds:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke1-tgw-attach"
+
+  WorkloadRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke1-rt"
+
+  WorkloadDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: WorkloadTGWAttachment
+    Properties:
+      RouteTableId: !Ref WorkloadRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayId: !Ref TransitGateway
+
+  WorkloadSubnetRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref WorkloadRouteTable
+
+  WorkloadSubnetRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref WorkloadRouteTable
+
+  # =========================================================================
+  # 5. WORKLOAD SPOKE 2 VPC (10.150.0.0/16 - Compute Fleet)
+  # =========================================================================
+  Workload2VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.150.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-workload-spoke2-vpc"
+
+  Workload2SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Workload2VPC
+      CidrBlock: 10.150.1.0/24
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke2-subnet-a"
+
+  Workload2SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Workload2VPC
+      CidrBlock: 10.150.2.0/24
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke2-subnet-b"
+
+  Workload2TGWAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref Workload2VPC
+      SubnetIds:
+        - !Ref Workload2SubnetA
+        - !Ref Workload2SubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke2-tgw-attach"
+
+  Workload2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Workload2VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-spoke2-rt"
+
+  Workload2DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: Workload2TGWAttachment
+    Properties:
+      RouteTableId: !Ref Workload2RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayId: !Ref TransitGateway
+
+  Workload2SubnetRouteAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Workload2SubnetA
+      RouteTableId: !Ref Workload2RouteTable
+
+  Workload2SubnetRouteAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref Workload2SubnetB
+      RouteTableId: !Ref Workload2RouteTable
+
+  # =========================================================================
+  # 6. TGW ROUTE TABLE ASSOCIATIONS, PROPAGATIONS & DEFAULT ROUTE
+  # =========================================================================
+  TGWRouteTableAssocSec:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref SecurityTGWAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TGWRouteTableAssocSpoke1:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref WorkloadTGWAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TGWRouteTableAssocSpoke2:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Properties:
+      TransitGatewayAttachmentId: !Ref Workload2TGWAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TGWRouteTablePropSec:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref SecurityTGWAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TGWRouteTablePropSpoke1:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref WorkloadTGWAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TGWRouteTablePropSpoke2:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Properties:
+      TransitGatewayAttachmentId: !Ref Workload2TGWAttachment
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+
+  TGWDefaultInternetRoute:
+    Type: AWS::EC2::TransitGatewayRoute
+    DependsOn:
+      - TGWRouteTableAssocSec
+    Properties:
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayAttachmentId: !Ref SecurityTGWAttachment
+
+  # =========================================================================
+  # 7. SPOKE 2 COMPUTE FLEET (WINDOWS & LINUX)
+  # =========================================================================
+  Spoke2InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Spoke 2 Compute Fleet"
+      VpcId: !Ref Workload2VPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: 10.0.0.0/8
+
+  Spoke2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  Spoke2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Spoke2InstanceRole
+
+  WindowsVM01:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: !Ref WindowsAmiId
+      SubnetId: !Ref Workload2SubnetA
+      SecurityGroupIds:
+        - !Ref Spoke2InstanceSecurityGroup
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-win-01"
+        - Key: AutoToggle
+          Value: "true"
+
+  WindowsVM02:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: !Ref WindowsAmiId
+      SubnetId: !Ref Workload2SubnetB
+      SecurityGroupIds:
+        - !Ref Spoke2InstanceSecurityGroup
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-win-02"
+        - Key: AutoToggle
+          Value: "true"
+
+  WindowsVM03:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: !Ref WindowsAmiId
+      SubnetId: !Ref Workload2SubnetA
+      SecurityGroupIds:
+        - !Ref Spoke2InstanceSecurityGroup
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-win-03"
+        - Key: AutoToggle
+          Value: "true"
+
+  WindowsVM04:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      ImageId: !Ref WindowsAmiId
+      SubnetId: !Ref Workload2SubnetB
+      SecurityGroupIds:
+        - !Ref Spoke2InstanceSecurityGroup
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-win-04"
+        - Key: AutoToggle
+          Value: "true"
+
+  LinuxVM01:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref Workload2SubnetA
+      SecurityGroupIds:
+        - !Ref Spoke2InstanceSecurityGroup
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-linux-01"
+        - Key: AutoToggle
+          Value: "true"
+
+  LinuxVM02:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref Workload2SubnetB
+      SecurityGroupIds:
+        - !Ref Spoke2InstanceSecurityGroup
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-linux-02"
+        - Key: AutoToggle
+          Value: "true"
+
+  # =========================================================================
+  # 8. ECR CONTAINER REGISTRY
+  # =========================================================================
+  VulnerableECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${EnvironmentName}-vulnerable-images"
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: false
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowPullPushAll
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:BatchGetImage"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:PutImage"
+              - "ecr:InitiateLayerUpload"
+              - "ecr:UploadLayerPart"
+              - "ecr:CompleteLayerUpload"
+
+  # =========================================================================
+  # 9. INTERNAL APPLICATION LOAD BALANCER & DVWA TARGET (SPOKE 1)
+  # =========================================================================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Internal ALB SG allowing traffic from Security VPC"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.200.0.0/16
+
+  DVWASecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for DVWA Web Target"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  DVWAInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  DVWAInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref DVWAInstanceRole
+
+  DVWAInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !Ref DVWASecurityGroup
+      IamInstanceProfile: !Ref DVWAInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-dvwa-target"
+        - Key: AutoToggle
+          Value: "true"
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          exec > /var/log/user-data.log 2>&1
+          dnf update -y
+          dnf install -y docker
+          systemctl enable docker
+          systemctl start docker
+          docker run -d -p 80:80 --name dvwa vulnerables/web-dvwa
+
+  AppLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${EnvironmentName}-int-alb"
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Scheme: internal
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${EnvironmentName}-dvwa-tg"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      Targets:
+        - Id: !Ref DVWAInstance
+      HealthCheckPath: /login.php
+      HealthCheckProtocol: HTTP
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref AppLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # =========================================================================
+  # 10. DATABASE SERVICE (RDS Postgres in Spoke 1)
+  # =========================================================================
+  OpenDatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Insecure SG for RDS Database"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          CidrIp: 0.0.0.0/0
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "DB Subnet Group for Demo RDS"
+      SubnetIds:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+
+  InsecurePostgresDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub "${EnvironmentName}-db-dspm-target"
+      AllocatedStorage: '20'
+      DBInstanceClass: db.t3.micro
+      Engine: postgres
+      EngineVersion: '15'
+      MasterUsername: postgresadmin
+      MasterUserPassword: "Password123!"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref OpenDatabaseSecurityGroup
+      PubliclyAccessible: false
+      StorageEncrypted: false
+      EnableCloudwatchLogsExports: []
+      DeletionProtection: false
+
+  # =========================================================================
+  # 11. AMAZON EKS CLUSTER & WORKER NODES (Spoke 1)
+  # =========================================================================
+  EKSClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  InsecureEKSCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Sub "${EnvironmentName}-eks-cluster"
+      Version: !Ref KubernetesVersion
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref PublicSubnetA
+          - !Ref PublicSubnetB
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+        PublicAccessCidrs:
+          - "0.0.0.0/0"
+      Logging:
+        ClusterLogging:
+          EnabledTypes: []
+
+  EKSNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ExcessiveS3AccessForAC6Demo
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ExcessivePermissionsForAC6Finding
+                Effect: Allow
+                Action:
+                  - s3:*
+                Resource: '*'
+
+  EKSNodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-eks-node-lt"
+      LaunchTemplateData:
+        InstanceType: t3.medium
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub "${EnvironmentName}-eks-node"
+
+  EKSNodegroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref InsecureEKSCluster
+      NodegroupName: !Sub "${EnvironmentName}-nodes"
+      NodeRole: !GetAtt EKSNodeRole.Arn
+      ScalingConfig:
+        MinSize: 1
+        DesiredSize: 2
+        MaxSize: 3
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      LaunchTemplate:
+        Id: !Ref EKSNodeLaunchTemplate
+        Version: !GetAtt EKSNodeLaunchTemplate.LatestVersionNumber
+
+  # =========================================================================
+  # 12. AUTOMATION BASTION HOST
+  # =========================================================================
+  AutomationHostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AutomationRunnerECRandEKSPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                Resource: !GetAtt VulnerableECRRepository.Arn
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                Resource: !GetAtt InsecureEKSCluster.Arn
+
+  AutomationHostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AutomationHostRole
+
+  EKSRunnerAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref InsecureEKSCluster
+      PrincipalArn: !GetAtt AutomationHostRole.Arn
+      Type: STANDARD
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+  AutomationHost:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - InsecurePostgresDB
+      - EKSNodegroup
+      - VulnerableECRRepository
+      - EKSRunnerAccessEntry
+      - TGWDefaultInternetRoute
+    Properties:
+      InstanceType: t3.medium
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref PublicSubnetA
+      SecurityGroupIds:
+        - !Ref OpenDatabaseSecurityGroup
+      IamInstanceProfile: !Ref AutomationHostInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-automation-runner"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > /var/log/user-data.log 2>&1
+          echo "Starting automated provisioning..."
+
+          dnf update -y
+          dnf install -y postgresql15 jq systemd docker
+
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+          systemctl enable docker
+          systemctl start docker
+
+          KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -LO "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          mv ./kubectl /usr/local/bin/
+
+          # STEP 1: Seed RDS Database
+          DB_HOST="${InsecurePostgresDB.Endpoint.Address}"
+          export PGPASSWORD="Password123!"
+
+          until pg_isready -h $DB_HOST -p 5432 -U postgresadmin; do
+            echo "Waiting for PostgreSQL database engine..."
+            sleep 10
+          done
+
+          psql -h $DB_HOST -U postgresadmin -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'federal_tax_records'" | grep -q 1 || psql -h $DB_HOST -U postgresadmin -d postgres -c "CREATE DATABASE federal_tax_records;"
+
+          psql -h $DB_HOST -U postgresadmin -d federal_tax_records << 'EOF'
+          CREATE TABLE IF NOT EXISTS citizen_financial_data (
+              id SERIAL PRIMARY KEY,
+              full_name VARCHAR(100),
+              ssn VARCHAR(11),
+              credit_card VARCHAR(16),
+              annual_income NUMERIC(12, 2)
+          );
+
+          TRUNCATE TABLE citizen_financial_data;
+
+          INSERT INTO citizen_financial_data (full_name, ssn, credit_card, annual_income) VALUES
+          ('Jane Doe', '900-12-3456', '4532015589123456', 125000.00),
+          ('John Smith', '900-98-7654', '378282246310005', 98000.00),
+          ('Robert Johnson', '900-44-1122', '5412889910234567', 210000.00);
+          EOF
+
+          # STEP 2: Seed ECR with Vulnerable Container Images
+          ECR_URL="${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com"
+          REPO_NAME="${VulnerableECRRepository}"
+
+          aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin $ECR_URL
+
+          docker pull vulnerables/web-dvwa:latest
+          docker tag vulnerables/web-dvwa:latest $ECR_URL/$REPO_NAME:vulnerable-app-latest
+          docker push $ECR_URL/$REPO_NAME:vulnerable-app-latest
+
+          docker pull node:12-alpine
+          docker tag node:12-alpine $ECR_URL/$REPO_NAME:outdated-node-v12
+          docker push $ECR_URL/$REPO_NAME:outdated-node-v12
+
+          # STEP 3: Configure kubectl & Deploy K8s Workload
+          EKS_NAME="${InsecureEKSCluster}"
+          REGION="${AWS::Region}"
+
+          aws eks update-kubeconfig --name $EKS_NAME --region $REGION
+
+          cat << 'EOF' > /tmp/vulnerable-workload.yaml
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: demo-workload
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: insecure-workload
+            namespace: demo-workload
+            labels:
+              app: insecure-app
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: insecure-app
+            template:
+              metadata:
+                labels:
+                  app: insecure-app
+              spec:
+                hostPID: true
+                containers:
+                - name: vulnerable-container
+                  image: alpine:latest
+                  command: ["/bin/sh", "-c", "sleep 3600"]
+                  securityContext:
+                    privileged: true
+                    allowPrivilegeEscalation: true
+                    runAsUser: 0
+                  volumeMounts:
+                  - mountPath: /host
+                    name: host-volume
+                volumes:
+                - name: host-volume
+                  hostPath:
+                    path: /
+          EOF
+
+          kubectl apply -f /tmp/vulnerable-workload.yaml
+          echo "Automated setup completed successfully!"
+
+  # ============================================================================
+  # 13. CLAP ON / CLAP OFF AUTOMATION FOR EC2 INSTANCES WITH AUTOTOGGLE:TRUE TAG
+  # ============================================================================
+  EnvironmentToggleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-EnvToggleAutomationRole-v2"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EC2TogglePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: !Sub "arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:instance/*"
+
+  EnvironmentToggleAutomation:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub "${AWS::StackName}-ClapToggle-v2"
+      DocumentType: Automation
+      Content:
+        schemaVersion: "0.3"
+        assumeRole: "{{ AutomationAssumeRole }}"
+        parameters:
+          Action:
+            type: String
+            description: "Target state: 'start' to clap on, 'stop' to clap off."
+            allowedValues:
+              - start
+              - stop
+            default: stop
+          AutomationAssumeRole:
+            type: String
+            default: !GetAtt EnvironmentToggleRole.Arn
+        mainSteps:
+          - name: toggleInstances
+            action: aws:executeScript
+            inputs:
+              Runtime: python3.11
+              Handler: script_handler
+              InputPayload:
+                Action: "{{ Action }}"
+                StackName: !Ref "AWS::StackName"
+              Script: |-
+                import boto3
+
+                def script_handler(events, context):
+                    ec2 = boto3.client('ec2')
+                    action = events['Action']
+                    stack_name = events['StackName']
+                    
+                    response = ec2.describe_instances(
+                        Filters=[
+                            {'Name': 'tag:AutoToggle', 'Values': ['true']},
+                            {'Name': 'tag:aws:cloudformation:stack-name', 'Values': [stack_name]},
+                            {'Name': 'instance-state-name', 'Values': ['running', 'stopped']}
+                        ]
+                    )
+                    
+                    target_ids = []
+                    for reservation in response.get('Reservations', []):
+                        for instance in reservation.get('Instances', []):
+                            target_ids.append(instance['InstanceId'])
+                            
+                    if not target_ids:
+                        return {"Result": "No instances found matching AutoToggle=true."}
+                        
+                    if action == "stop":
+                        ec2.stop_instances(InstanceIds=target_ids)
+                        return {"Result": f"Clap OFF: Stopping instances: {target_ids}"}
+                    elif action == "start":
+                        ec2.start_instances(InstanceIds=target_ids)
+                        return {"Result": f"Clap ON: Starting instances: {target_ids}"}
+                    else:
+                        raise ValueError(f"Unsupported action: {action}")
+
+  # ============================================================================
+  # 14. BROKER VM BUILD (2-STAGE PROCESS: S3 IMPORT + EC2 INSTANCE)
+  # ============================================================================
+  ImageImportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-image-import-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  VMImportRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: vmimport
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vmie.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:Externalid: vmimport
+      Policies:
+        - PolicyName: vmimport
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ImageImportBucket.Arn
+                  - !Sub "${ImageImportBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - ec2:ModifySnapshotAttribute
+                  - ec2:CopySnapshot
+                  - ec2:RegisterImage
+                  - ec2:Describe*
+                Resource: "*"
+
+  BrokerVMSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: DeployBrokerVM
+    Properties:
+      GroupDescription: "Security Group for Cortex Broker VM in Security VPC"
+      VpcId: !Ref SecurityVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 4443
+          ToPort: 4443
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: udp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 514
+          ToPort: 514
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/8
+
+  BrokerVMInstance:
+    Type: AWS::EC2::Instance
+    Condition: DeployBrokerVM
+    Properties:
+      ImageId: !Ref BrokerVmAmiId
+      InstanceType: t3.xlarge
+      SubnetId: !Ref SecurityManagementSubnetA
+      SecurityGroupIds:
+        - !Ref BrokerVMSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-cortex-broker-vm"
+        - Key: AutoToggle
+          Value: "false"
+
+  # =========================================================================
+  # 15. SPOKE 3 DUAL STACK IPV4 & IPv6 VPC
+  # =========================================================================
+  Spoke3VPC:
+    Type: AWS::EC2::VPC
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      CidrBlock: !Ref Spoke3VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-vpc"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  Spoke3VPCIpv6CidrBlock:
+    Type: AWS::EC2::VPCCidrBlock
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      VpcId: !Ref Spoke3VPC
+      AmazonProvidedIpv6CidrBlock: true
+
+  Spoke3SubnetA:
+    Type: AWS::EC2::Subnet
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: Spoke3VPCIpv6CidrBlock
+    Properties:
+      VpcId: !Ref Spoke3VPC
+      CidrBlock: !Ref Spoke3SubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Ipv6CidrBlock: !Select [0, !Cidr [!Select [0, !GetAtt Spoke3VPC.Ipv6CidrBlocks], 1, 64]]
+      AssignIpv6AddressOnCreation: true
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-subnet-a"
+
+  Spoke3RouteTable:
+    Type: AWS::EC2::RouteTable
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      VpcId: !Ref Spoke3VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-rt"
+
+  Spoke3SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      SubnetId: !Ref Spoke3SubnetA
+      RouteTableId: !Ref Spoke3RouteTable
+
+  Spoke3DefaultIPv4Route:
+    Type: AWS::EC2::Route
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: Spoke3TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref Spoke3RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      TransitGatewayId: !Ref TransitGateway
+
+  Spoke3DefaultIPv6Route:
+    Type: AWS::EC2::Route
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: Spoke3TransitGatewayAttachment
+    Properties:
+      RouteTableId: !Ref Spoke3RouteTable
+      DestinationIpv6CidrBlock: "::/0"
+      TransitGatewayId: !Ref TransitGateway
+
+  Spoke3TransitGatewayAttachment:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref Spoke3VPC
+      SubnetIds:
+        - !Ref Spoke3SubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-tgw-attachment"
+
+  Spoke3TGWRouteTableAssociation:
+    Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      TransitGatewayAttachmentId: !Ref Spoke3TransitGatewayAttachment
+
+  Spoke3TGWRouteTablePropagation:
+    Type: AWS::EC2::TransitGatewayRouteTablePropagation
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      TransitGatewayAttachmentId: !Ref Spoke3TransitGatewayAttachment
+
+  TransitGatewayDefaultIPv6Route:
+    Type: AWS::EC2::TransitGatewayRoute
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
+      DestinationCidrBlock: "::/0"
+      TransitGatewayAttachmentId: !Ref SecurityTGWAttachment
+
+  # =========================================================================
+  # 16. SPOKE 3 DUAL-STACK COMPUTE FLEET (WINDOWS & LINUX)
+  # =========================================================================
+  Spoke3SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: ShouldDeployDualStackSpoke
+    Properties:
+      GroupDescription: "Security group for Spoke 3 dual-stack test hosts"
+      VpcId: !Ref Spoke3VPC
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: 10.0.0.0/8
+        - IpProtocol: 58 # ICMPv6
+          CidrIpv6: "::/0"
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIpv6: !Select [0, !GetAtt Spoke3VPC.Ipv6CidrBlocks]
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIpv6: !Select [0, !GetAtt Spoke3VPC.Ipv6CidrBlocks]
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: -1
+          CidrIpv6: "::/0"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-sg"
+
+  Spoke3Linux01:
+    Type: AWS::EC2::Instance
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: Spoke3SubnetA
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t3.medium
+      SubnetId: !Ref Spoke3SubnetA
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      SecurityGroupIds:
+        - !Ref Spoke3SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          echo "nameserver 10.200.0.2" >> /etc/resolv.conf
+          CA_PARAM=$(aws ssm get-parameter --name "/${EnvironmentName}/pki/fortigate-ca-cert" --query "Parameter.Value" --output text --region ${AWS::Region} 2>/dev/null || true)
+          if [ -n "$CA_PARAM" ]; then
+            echo "$CA_PARAM" > /etc/pki/ca-trust/source/anchors/Fortinet_CA.pem
+            update-ca-trust extract
+          fi
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-linux-01"
+        - Key: AutoToggle
+          Value: "true"
+
+  Spoke3Win01:
+    Type: AWS::EC2::Instance
+    Condition: ShouldDeployDualStackSpoke
+    DependsOn: Spoke3SubnetA
+    Properties:
+      ImageId: !Ref WindowsAmiId
+      InstanceType: t3.medium
+      SubnetId: !Ref Spoke3SubnetA
+      IamInstanceProfile: !Ref Spoke2InstanceProfile
+      SecurityGroupIds:
+        - !Ref Spoke3SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          <powershell>
+          try {
+            $caCert = (Get-SSMParameterValue -Name "/${EnvironmentName}/pki/fortigate-ca-cert" -Region ${AWS::Region}).Parameters[0].Value
+            if ($caCert) {
+              $path = "$env:TEMP\Fortinet_CA.cer"
+              Set-Content -Path $path -Value $caCert
+              Import-Certificate -FilePath $path -CertStoreLocation Cert:\LocalMachine\Root
+              Remove-Item $path
+            }
+          } catch {
+            Write-Host "No SSM CA found or not configured yet."
+          }
+          </powershell>
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-spoke3-win-01"
+        - Key: AutoToggle
+          Value: "true"
+
+Outputs:
+  TransitGatewayID:
+    Description: "AWS Transit Gateway with central route table"
+    Value: !Ref TransitGateway
+  FlowLogBucketName:
+    Description: "Dedicated S3 Bucket storing VPC and TGW Flow Logs"
+    Value: !Ref FlowLogBucket
+  FlowLogsQueueURL:
+    Description: "SQS Queue URL for Cortex Flow Log Ingestion"
+    Value: !Ref FlowLogsQueue
+  FlowLogsQueueARN:
+    Description: "SQS Queue ARN for Cortex Flow Log Ingestion"
+    Value: !GetAtt FlowLogsQueue.Arn
+  FortiGatePublicDataIP:
+    Description: "Port 1 (WAN) Public IP (EIP)"
+    Value: !Ref FortiGatePublicEIP
+  FortiGateManagementPublicIP:
+    Description: "Port 3 (MGMT) Dedicated Public IP (EIP) for Out-of-Band Admin & Cortex Broker VM Integration"
+    Value: !Ref FortiGateMgmtEIP
+  FortiGateManagementURL:
+    Description: "FortiGate HTTPS Admin Console (Port 443 on MGMT interface)"
+    Value: !Sub "https://${FortiGateMgmtEIP}"
+  InternalALBDNSName:
+    Description: "Internal Workload ALB DNS Name (Routed through Fortinet)"
+    Value: !GetAtt AppLoadBalancer.DNSName
+  ECRRepositoryURI:
+    Description: "ECR Repository URI populated with vulnerable images"
+    Value: !GetAtt VulnerableECRRepository.RepositoryUri
+  RDSEndpoint:
+    Description: "Unencrypted Database Endpoint (Seeded with PII)"
+    Value: !GetAtt InsecurePostgresDB.Endpoint.Address
+  AutomationHostInstanceId:
+    Description: "EC2 Instance ID for SSM Console Connection"
+    Value: !Ref AutomationHost
+  WindowsVM01Id:
+    Description: "Windows VM 01 Instance ID"
+    Value: !Ref WindowsVM01
+  WindowsVM02Id:
+    Description: "Windows VM 02 Instance ID"
+    Value: !Ref WindowsVM02
+  WindowsVM03Id:
+    Description: "Windows VM 03 Instance ID"
+    Value: !Ref WindowsVM03
+  WindowsVM04Id:
+    Description: "Windows VM 04 Instance ID"
+    Value: !Ref WindowsVM04
+  LinuxVM01Id:
+    Description: "Linux VM 01 Instance ID"
+    Value: !Ref LinuxVM01
+  LinuxVM02Id:
+    Description: "Linux VM 02 Instance ID"
+    Value: !Ref LinuxVM02
+  Spoke3VPCId:
+    Description: "Spoke 3 Dual-Stack VPC ID"
+    Value: !If [ShouldDeployDualStackSpoke, !Ref Spoke3VPC, !Ref "AWS::NoValue"]
+  Spoke3Linux01Id:
+    Description: "Spoke 3 Linux Host Instance ID"
+    Value: !If [ShouldDeployDualStackSpoke, !Ref Spoke3Linux01, !Ref "AWS::NoValue"]
+  Spoke3Win01Id:
+    Description: "Spoke 3 Windows Host Instance ID"
+    Value: !If [ShouldDeployDualStackSpoke, !Ref Spoke3Win01, !Ref "AWS::NoValue"]
+  ClapOffCommand:
+    Description: "Command to shut down standard EC2 workloads"
+    Value: !Sub "aws ssm start-automation-execution --document-name ${EnvironmentToggleAutomation} --parameters Action=stop --region ${AWS::Region}"
+  ClapOnCommand:
+    Description: "Command to start standard EC2 workloads"
+    Value: !Sub "aws ssm start-automation-execution --document-name ${EnvironmentToggleAutomation} --parameters Action=start --region ${AWS::Region}"
+  ImageImportBucketName:
+    Description: "Target bucket for Cortex Broker VMDK upload"
+    Value: !Ref ImageImportBucket
+  VMImportUploadCommand:
+    Description: "Command to upload VMDK to S3"
+    Value: !Sub "aws s3 cp broker-vm.vmdk s3://${ImageImportBucket}/broker-vm.vmdk"
+  VMImportSnapshotCommand:
+    Description: "Command to start snapshot import"
+    Value: !Sub "aws ec2 import-snapshot --description 'Cortex Broker VM' --disk-container 'Format=vmdk,UserBucket={S3Bucket=${ImageImportBucket},S3Key=broker-vm.vmdk}' --region ${AWS::Region}"
+  CortexFlowLogsRoleArn:
+    Description: "IAM Role ARN to paste into the Cortex S3 Log Collection modal"
+    Value: !GetAtt CortexFlowLogsRole.Arn
+  CortexExternalIdUsed:
+    Description: "External ID to paste into the Cortex S3 Log Collection modal"
+    Value: !Ref CortexExternalId
+  DNSLogsQueueURL:
+    Description: "SQS Queue URL for Cortex Route 53 DNS Log Ingestion"
+    Value: !Ref DNSLogsQueue
+  DNSLogsQueueARN:
+    Description: "SQS Queue ARN for Cortex Route 53 DNS Log Ingestion"
+    Value: !GetAtt DNSLogsQueue.Arn
+  DNSLogBucketName:
+    Description: "Dedicated S3 Bucket storing Route 53 DNS Query Logs"
+    Value: !Ref DNSLogBucket
+
