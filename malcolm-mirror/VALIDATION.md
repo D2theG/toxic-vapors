@@ -11,10 +11,10 @@ Initial preparation and subsequent authorized deployment tested on 2026-11-05. T
 | Python / shell / design checks | **PASS** | Python compile, rendered bootstrap and download helper shell syntax, template size, source safety/capture defaults. See check_design.py. |
 | Actual offline Zeek 9.0.1 execution | **PASS** | Native ARM64 container, networking disabled, synthetic Ethernet/IPv4/VXLAN fixture: inner HTTP GET + 200 response, DNS query + answer, expected endpoints and tunnel association |
 | Live AWS mirror delivery | **PASS for controlled outbound HTTP and DNS** | Systemd-managed 60-second capture: 115 packets, zero kernel drops; Zeek decoded exact test markers and inner endpoints. Cross-VPC inbound HTTP remains unverified. |
-| Malcolm install/start/auth/UI | **NOT RUN** | Operator stage; pinned installer is prepared with SHA-256, not executed |
+| Malcolm install/start/auth/import | **PASS** | User completed private auth; all 27 containers healthy; exact inner DNS/HTTP markers indexed. Browser sign-in remains pending. |
 | XSIAM / Corelight modeling | **NOT RUN / out of scope** | No forwarding, models or dashboards changed |
 
-`CREATE_COMPLETE` must not be treated as application readiness. Check the bootstrap marker, SSM, Zeek and deliberately generated inner flows before enabling a demo narrative. CloudFormation provisioning, IAM permissions and software egress were subsequently exercised successfully. Full Malcolm application health remains untested.
+`CREATE_COMPLETE` must not be treated as application readiness. Check the bootstrap marker, SSM, Zeek and deliberately generated inner flows before enabling a demo narrative. CloudFormation provisioning, IAM permissions and software egress were subsequently exercised successfully. Full Malcolm application health was subsequently verified; see the final application acceptance below.
 
 ## Reproduce the meaningful offline test
 
@@ -94,3 +94,19 @@ The previous configuration approval blocker is resolved. Remaining work is opera
 ### Approved private-authentication prerequisites
 
 After explicit user approval, `ubuntu` was added to the sensor's existing Docker group and `apache2-utils` installed. A fresh process as `ubuntu` successfully read Docker server version 29.1.3, `htpasswd` resolved to `/usr/bin/htpasswd`, and Compose configuration validation passed. The installer reported no service/container restart required; the Friday stop timer remains active. No authentication command ran and no credentials were generated. The approved prior setup-status diff was published to the existing PR.
+
+
+## Final application acceptance (2026-11-05, 04:14 UTC)
+
+Earlier incomplete statuses above are historical. The user completed private authentication. Metadata-only checks confirmed required files existed and were nonempty; the administrator hash file was restricted to mode 0600. No passwords, hashes or private keys were read or published.
+
+- Startup completed successfully in 3m18.881s. All 27 Compose containers were running and healthy at the final snapshot, including NetBox after initialization.
+- `/mapi/ready` returned true for OpenSearch, PCAP monitor, Logstash Lumberjack and pipelines, Arkime, dashboards/maps, NetBox, Redis/cache, frequency and Strelka. Extracted-files and filebeat-TCP were disabled; filescan readiness was false despite container health. Those paths remain outside acceptance.
+- A single 33,962-byte closed PCAP was copied into `pcap/upload`, moved to `pcap/processed` and generated a processed Zeek archive.
+- A read-only internal `/mapi/document` request with `{"from":"0","to":"now","limit":500,"track_total_hits":true}` returned 93 records, exact total (`eq`), two successful shards, zero failed shards and no timeout. Provider counts: Zeek 70, Arkime 11, Suricata 12.
+- Exact controlled DNS and HTTP markers were found in both Zeek and Arkime field values. DNS status was NOERROR and HTTP status 404 matched the originating test. Private addresses, captures and detailed evidence are excluded from this public repository.
+- An earlier tag-filtered query returned zero because it assumed a numeric date filename component was indexed as a tag. Broader document retrieval and exact field matching corrected that assumption; the empty query was not evidence of missing ingestion.
+- A local ARM64 Docker Session Manager client, with AWS plugin package signature verified, reached the loopback HTTPS listener. An unauthenticated credential-free request returned HTTP 401. The self-signed certificate was bypassed only for that local unauthenticated probe; no global TLS or trust settings changed. Private browser login and dashboard visuals remain unverified.
+- Final host snapshot: 70 GiB disk available, approximately 5 GiB RAM available, no swap. This is a small artifact-analysis test, not a load/retention test.
+
+References: [PCAP upload](https://malcolm.fyi/docs/upload.html), [readiness API](https://malcolm.fyi/docs/api-ready.html), [document lookup API](https://malcolm.fyi/docs/api-document-lookup.html). No continuous capture, Broker delivery, XSIAM modeling or optional file-analysis acceptance is claimed. Existing Friday cleanup remains scheduled.

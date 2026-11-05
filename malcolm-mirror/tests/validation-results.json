@@ -41,7 +41,7 @@
     "synthetic": true
   },
   "not_run": [
-    "Malcolm installation/authentication/UI",
+    "Authenticated Malcolm browser UI and dashboard visual acceptance",
     "XSIAM ingest/model/detection validation",
     "Sustained capture throughput"
   ],
@@ -66,5 +66,31 @@
     "packets_captured": 51,
     "kernel_drops": 0,
     "apparmor": "Enforced, unchanged"
+  },
+  "malcolm_application": {
+    "checked_at_utc": "2026-11-05T04:14:41Z",
+    "release": "26.10.0",
+    "running_containers": 27,
+    "healthy_containers": 27,
+    "authentication": "User completed privately; metadata only inspected",
+    "pcap_bytes": 33962,
+    "indexed_documents": 93,
+    "provider_counts": {
+      "Zeek": 70,
+      "Arkime": 11,
+      "Suricata": 12
+    },
+    "failed_shards": 0,
+    "timed_out": false,
+    "exact_dns_http_markers": "Present in Zeek and Arkime; HTTP 404 matches client",
+    "unauthenticated_loopback_https_status": 401,
+    "authenticated_browser": "Pending user confirmation",
+    "false_readiness_flags": [
+      "extracted_files",
+      "filebeat_tcp",
+      "filescan"
+    ],
+    "disk_available_gib": 70,
+    "ram_available_gib_approx": 5
   }
 }

@@ -154,7 +154,7 @@ After base acceptance, use the verified download helper on the new sensor as `ub
 
 Follow the installer reboot instruction; reconnect by SSM, start Malcolm and verify `scripts/status` plus the authenticated UI. Reach HTTPS through Session Manager port forwarding to the new instance's port 443, for example with `AWS-StartPortForwardingSession` local port 8443. This requires the Session Manager client/plugin on the operator workstation or another approved access method; do not open the sensor security group to work around missing tooling. No host plugin was installed by this work. No HTTPS ingress rule is needed for an SSM tunnel.
 
-This stage has not been runtime-tested. Registry access, TLS inspection trust, local OpenSearch initialization, authentication and available disk may still block it. A Zeek PCAP result remains useful if the larger Malcolm UI is deferred. Zeek output is not automatically Corelight output, and neither this stack nor Malcolm setup configures XSIAM ingestion or validates its content pack/model rules.
+This stage was subsequently runtime-tested: all 27 containers are healthy and a controlled PCAP was indexed. Authenticated browser UI acceptance is still pending; see the current status below. Zeek output is not automatically Corelight output, and neither this stack nor Malcolm setup configures XSIAM ingestion or validates its content pack/model rules.
 
 ## Cost and teardown
 
@@ -202,7 +202,7 @@ The cleanup execution role allows deletion only of enumerated experiment-owned r
 
 The approved incremental ceiling is $30. Approximately 44.5 hours at the verified instance, 100-GiB storage and one-session rates projects about $18.3 before transfer and other charges. This is an estimate, not an AWS-enforced spending cap. Stopping an instance leaves storage and mirror-session charges; verify actual stack/resource deletion and inspect the scheduler dead-letter queue on any failure. No changes are planned after Friday 9 a.m. Central.
 
-The sensor captures only when its bounded test helper is invoked; this is not continuous recording or a running Malcolm UI. Preserve native Zeek JSON. CEF/syslog and JSON/Kafka remain future Broker transport options; neither forwarding nor XDM changes have been configured.
+The sensor captures only when its bounded test helper is invoked; this is not continuous recording. The full Malcolm application now runs for artifact analysis. Preserve native Zeek JSON. CEF/syslog and JSON/Kafka remain future Broker transport options; neither forwarding nor XDM changes have been configured.
 
 ### Live acceptance outcome
 
@@ -210,8 +210,12 @@ Systemd-managed capture stopped after exactly 60 seconds with 115 packets and ze
 
 The cross-VPC HTTP request still timed out, although DVWA returns 302 locally. Its expected tuple was not present in the controlled capture; the blocking point is unconfirmed. No original lab configuration was changed to repair it. This is a successful controlled outbound HTTP/DNS capture test, not full Malcolm UI, continuous recording, or Broker ingestion acceptance.
 
-### Full Malcolm is configured, not running
+### Full Malcolm running; capture import passed
 
-The pinned 26.10.0 application is staged at `/home/ubuntu/Malcolm`. Its configuration-only step and `docker compose --profile malcolm config --quiet` passed at 03:16 UTC on November 5. The initial automatic approval rejection was resolved by read-only source evidence: this path copies credential placeholders and does not generate credentials, run `auth_setup`, or start containers. The exact operation was retried once and succeeded.
+At 04:14 UTC on November 5, all 27 Malcolm 26.10.0 containers were healthy, including NetBox after its initial migration/startup. The user completed authentication privately; only artifact presence and permissions were inspected. The service started successfully at 04:09 UTC after one transient registry download failure was resolved by retrying the affected image.
 
-Verified settings: UI bind `127.0.0.1:443:443/tcp`; basic authentication selected; Malcolm live capture and interface tweaks disabled. No Malcolm containers or HTTPS listener are running, and administrator password/TLS-key artifacts do not exist. User-controlled authentication, image pulls, host prerequisites and full application health/UI/PCAP validation remain pending. After explicit approval, Docker access for `ubuntu` was enabled and verified, and `apache2-utils` installed the required `htpasswd` utility. Administrator authentication remains a private user step. No Broker forwarding was configured. Standalone Zeek acceptance is not full Malcolm readiness.
+The existing 33,962-byte bounded capture was imported once. The document API returned exactly 93 indexed records (70 Zeek, 11 Arkime, 12 Suricata), with both shards successful and no timeout. Exact DNS and HTTP markers appear in both Zeek and Arkime; HTTP status 404 matches the test client. This verifies capture-to-index processing, not sustained throughput or an XSIAM integration.
+
+The HTTPS listener remains loopback-only. An ARM64 Docker-isolated Session Manager client exposes it locally; an unauthenticated request returns the expected HTTP 401. No host plugin was installed. Private administrator browser sign-in and visual dashboard inspection remain pending. At the final snapshot, 70 GiB disk and 5 GiB RAM were available. Core ingestion readiness and NetBox were true; extracted-files, filebeat-TCP and filescan API flags were false, so those optional paths are not accepted by this test even though containers are healthy.
+
+Malcolm live capture/interface tweaks remain disabled. No Broker forwarding or XDM changes were made. The approved Friday teardown schedule and budget remain unchanged. Historical setup steps and exact validation boundaries are preserved in [VALIDATION.md](VALIDATION.md).
