@@ -71,8 +71,22 @@ The sensor inventory showed no Malcolm containers or port-443 listener; only the
 
 Completed safely: downloaded the pinned 26.10.0 installer on the sensor; SHA-256 matched the documented release hash. Extracted the verified application archive to `/home/ubuntu/Malcolm` as the `ubuntu` user, rejecting unsafe archive members. Official `install.py --configure --non-interactive --defaults --dry-run --skip-splash` completed successfully. No full Malcolm images were pulled and no services started.
 
-**Blocker:** automatic approval review rejected the subsequent configuration-only command because it may write credential-bearing settings and the authorized scope explicitly excluded credential generation. The rejected command would have written default configuration, restricted the future HTTPS UI bind to loopback, and validated Compose without starting containers. It did not execute. No alternative execution path was attempted. Configuration, host tuning, authentication, image pulls, container health, UI access and PCAP import acceptance remain incomplete.
+**Historical blocker (resolved below):** automatic approval review rejected the subsequent configuration-only command because it may write credential-bearing settings and the authorized scope explicitly excluded credential generation. The rejected command would have written default configuration, restricted the future HTTPS UI bind to loopback, and validated Compose without starting containers. It did not execute. No alternative execution path was attempted. Configuration, host tuning, authentication, image pulls, container health, UI access and PCAP import acceptance remain incomplete.
 
 The proposed next step requires explicit approval for Malcolm configuration that may write credential-bearing settings. The user should perform `./scripts/auth_setup` privately in `/home/ubuntu/Malcolm` when that configuration is ready; never paste passwords into chat or log them through Run Command. Existing capture service behavior, Friday timers, network exposure, and the original lab remain unchanged.
 
 The official [quick start](https://malcolm.fyi/docs/quickstart.html) requires authentication setup before image pulls, and [authentication documentation](https://malcolm.fyi/docs/authsetup.html) requires it before first startup. Do not disable authentication to bypass this step. Once authorized and authenticated, verify `scripts/status`, localhost HTTPS, private browser access, and imported test PCAP inner HTTP/DNS records before calling Malcolm ready. No Broker forwarding is part of that acceptance.
+
+### Configuration-only retry and result: 03:16 UTC
+
+Read-only source inspection traced `install.py`, `installer/core/malcolm_config.py`, and `installer/platforms/linux.py`: configuration mode copies missing `.env.example` files to `.env`, writes mapped settings, `.configured`, and Compose adjustments; it skips installation, host tweaks and Docker operations. It does not call `auth_setup`. Credential-related fields are static placeholders or empty fields, not newly generated passwords. The separate auth workflow writes administrator hashes to `config/auth.env` and `nginx/htpasswd`, and can generate internal service secrets/certificates. That workflow remains user-controlled. No actual secret values were read or printed.
+
+With this materially new evidence, the exact previously unexecuted command was submitted once for review and approved. Configuration completed successfully, the UI bind was restricted to loopback, and `docker compose --profile malcolm config --quiet` exited 0. Post-checks confirmed:
+
+- `nginx-proxy` port: `127.0.0.1:443:443/tcp`; `NGINX_AUTH_MODE=basic`.
+- All Malcolm live capture toggles and `PCAP_IFACE_TWEAK` are false.
+- `.configured` exists; `nginx/htpasswd` and `nginx/certs/key.pem` do not.
+- No containers or port-443 listener are running. Docker and the Friday stop timer remain active.
+- `vm.max_map_count=1048576`; the `ubuntu` account is not in the Docker group. Configuration-only mode did not perform host tuning or daemon-access setup.
+
+The previous configuration approval blocker is resolved. Remaining work is operator authentication plus required host access/tuning, image pulls, service health, private browser access, and controlled PCAP import. Do not start with placeholders. The successful Zeek capture and existing lab were not changed by this step.
