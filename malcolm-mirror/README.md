@@ -1,6 +1,6 @@
 # Passive Malcolm / Zeek traffic-mirroring lab
 
-**Prepared for review, not deployed.** This is a separate, disposable CloudFormation stack. It adds a private capture sensor to an existing workload subnet and can mirror one existing EC2 ENI after explicit enablement. It does not update the large FortiGate template, existing routes/security groups/instances, or XSIAM configuration. This is an optional lab experiment, not a dependency for the Friday demo.
+**Capture foundation deployed on 2026-11-05; live acceptance is in progress.** This is a separate, disposable CloudFormation stack. It adds a private capture sensor to an existing workload subnet and can mirror one existing EC2 ENI after explicit enablement. It does not update the large FortiGate template, existing routes/security groups/instances, or XSIAM configuration. This is an optional lab experiment, not a dependency for the Friday demo.
 
 ## Why a separate stack
 
@@ -22,7 +22,7 @@ flowchart LR
   PCAP --> Malcolm[Optional Malcolm artifact analysis]
 ```
 
-Read-only inspection on **2026-11-05** confirmed the main lab stack is `UPDATE_COMPLETE` in `us-east-2`. The selected DVWA source is a running `t3.micro`, with an ordinary attached ENI in the first workload VPC and `us-east-2a`. The proposed sensor uses the same subnet/AZ. Its subnet has an active VPC-local route and an active default route to the existing TGW. The subnet ACL allows IPv4 traffic in both directions, and the VPC uses AmazonProvidedDNS. No mirror sessions were returned by the complete `us-east-2` session listing. Existing SSM-managed hosts in this subnet were Online; **new sensor outbound access is still untested**.
+Read-only inspection on **2026-11-05** confirmed the main lab stack is `UPDATE_COMPLETE` in `us-east-2`. The selected DVWA source is a running `t3.micro`, with an ordinary attached ENI in the first workload VPC and `us-east-2a`. The proposed sensor uses the same subnet/AZ. Its subnet has an active VPC-local route and an active default route to the existing TGW. The subnet ACL allows IPv4 traffic in both directions, and the VPC uses AmazonProvidedDNS. Before deployment, no mirror sessions were returned by the complete `us-east-2` session listing. One experimental session has since been enabled. Existing SSM-managed hosts in this subnet were Online; The new sensor subsequently completed bootstrap and SSM readiness; see the deployment evidence below.
 
 Same-subnet capture avoids sending mirrored packets through the TGW/FortiGate and avoids NLB/GWLB costs. Bootstrap and SSM still depend on the existing outbound inspection/NAT path. Do not change that path to make this experiment work before the demo. If bootstrap is blocked, leave mirroring disabled and stop/defer the experiment.
 
@@ -34,7 +34,7 @@ The source is **one workload ENI**, not an entire VPC tap. This captures that ho
 - An explicit target ENI, dedicated security group, SSM instance role/profile, mirror target, IPv4 ingress/egress filter rules, and optional session. No public address, key pair, SSH ingress, or HTTPS ingress is configured.
 - UDP 4789 ingress only from the source ENI's primary IPv4 `/32`. Outbound TCP 80/443 supports packages, images and SSM; DNS is limited to the VPC resolver. No forwarding/bridging or source/destination-check disabling is used.
 - `NetworkServices: [amazon-dns]`, because ordinary mirror rules alone do not include Amazon-provided DNS. Full packets are requested by omitting `PacketLength`.
-- A four-hour stop timer installed **before** bootstrap downloads. It restarts its uptime countdown after each boot. The parameter range is one to eight hours. A stopped sensor still incurs EBS charges; existing mirror sessions still incur charges until deleted.
+- An absolute stop deadline installed **before** bootstrap downloads (`ShutdownAtUtc`). The deployed backup is Friday, November 6, 2026 at 23:10 UTC (5:10 p.m. Central), with `Persistent=true`; reboot does not reset it. A stopped sensor still incurs EBS charges; existing mirror sessions still incur charges until deleted.
 - A pinned Zeek 9.0.1 amd64 image and a root-only capture helper. It does not automatically install/start Malcolm, generate authentication, or forward anything to XSIAM.
 
 The sizing meets Malcolm's documented minimum but is below its preferred 16+ CPU recommendation. It is intended for a small controlled capture, not production throughput. The EC2 image is amd64 on actual x86 EC2 hardware; the local Mac fixture test used the official **ARM64** Zeek image, with no Rosetta.
@@ -122,7 +122,7 @@ sudo /usr/local/sbin/mirror-capture-test
 
 This selects the interface on the source's local route, captures only outer UDP 4789, runs for 60 seconds and rotates through four approximately 100-MB files. Each run has a new root-only directory. **Repeated runs accumulate directories**; retain only the needed test and remove superseded captures. It is a bounded test, not an unattended recorder. Review tcpdump packet/drop counts.
 
-During that minute, manually issue a benign HTTP request to the existing DVWA host from an existing permitted test client (`curl --max-time 5 'http://SOURCE_PRIVATE_IP/?mirror-demo=UNIQUE_MARKER'`). On the mirrored host, an uncached DNS lookup such as `getent ahostsv4 mirror-UNIQUE_MARKER.example.com` exercises its configured resolver; NXDOMAIN is an acceptable expected response. Use existing tools only. No exploits, scans, attacks, model changes or source-host package installs are required. These commands were **not executed** during preparation.
+During that minute, manually issue a benign HTTP request to the existing DVWA host from an existing permitted test client (`curl --max-time 5 'http://SOURCE_PRIVATE_IP/?mirror-demo=UNIQUE_MARKER'`). On the mirrored host, an uncached DNS lookup such as `getent ahostsv4 mirror-UNIQUE_MARKER.example.com` exercises its configured resolver; NXDOMAIN is an acceptable expected response. Use existing tools only. No exploits, scans, attacks, model changes or source-host package installs are required. These commands were not executed during initial preparation; live test results are tracked separately.
 
 Analyze a completed PCAP on the sensor (replace paths with the actual closed file; the ring names end in a digit):
 
@@ -165,10 +165,10 @@ For one sensor, 100 GiB and one session, excluding transfer/other charges:
 | Lifetime, if all new resources are removed at the end | Estimated incremental cost |
 |---|---:|
 | Four hours | about **$1.64** |
-| 24 hours continuously running (requires timer management) | about **$9.84** |
+| 24 hours continuously running | about **$9.84** |
 | 730 hours continuously running | about **$299.27** |
 
-These are estimates, not a spend cap or quote. Regional transfer, existing TGW/NAT/inspection-path processing for downloads, downloads/egress, taxes and optional exports/snapshots are additional. Same-AZ local mirroring avoids intentionally introducing cross-AZ/TGW mirror transport, but no blanket zero-network-charge promise is made. Malcolm image downloads can be substantial. No new NAT gateway, NLB, public IPv4 or VPC endpoint is provisioned. The four-hour timer limits a successful sensor boot's run duration; it does **not** delete sessions or EBS or provide a billing kill switch.
+These are estimates, not a spend cap or quote. Regional transfer, existing TGW/NAT/inspection-path processing for downloads, downloads/egress, taxes and optional exports/snapshots are additional. Same-AZ local mirroring avoids intentionally introducing cross-AZ/TGW mirror transport, but no blanket zero-network-charge promise is made. Malcolm image downloads can be substantial. No new NAT gateway, NLB, public IPv4 or VPC endpoint is provisioned. The absolute backup timer stops the sensor; it does **not** delete sessions or EBS or provide a billing kill switch. AWS EventBridge Scheduler independently initiates stack deletion after the approved runtime.
 
 Teardown order:
 
@@ -179,7 +179,7 @@ Teardown order:
 
 ## Validation evidence and limits
 
-See [VALIDATION.md](VALIDATION.md). Local parser/guard/shell checks, AWS `validate-template`, read-only preflight, and an actual offline Zeek VXLAN fixture are separate layers. None proves live packet delivery or Malcolm startup. No CloudFormation change set was created, no billable resource was deployed, and no source traffic or tenant changes were made during preparation.
+See [VALIDATION.md](VALIDATION.md). Local parser/guard/shell checks, AWS `validate-template`, read-only preflight, and an actual offline Zeek VXLAN fixture are separate layers. None proves live packet delivery or Malcolm startup. That statement described initial preparation only. The authorized sensor and mirror session are now deployed; tenant configuration remains unchanged. Live capture acceptance is still being evaluated.
 
 ## References
 
@@ -191,3 +191,19 @@ See [VALIDATION.md](VALIDATION.md). Local parser/guard/shell checks, AWS `valida
 - [Zeek VXLAN analyzer](https://docs.zeek.org/en/current/scripts/base/packet-protocols/vxlan/main.zeek.html)
 - [Official Zeek container](https://hub.docker.com/r/zeek/zeek)
 - [Malcolm AWS deployment](https://malcolm.fyi/docs/aws.html), [official pinned release](https://github.com/cisagov/Malcolm/releases/tag/v26.10.0)
+
+## Deployed runtime and cleanup verification (2026-11-05)
+
+Both the capture stack and separate cleanup controller report `UPDATE_COMPLETE`. The sensor has its bootstrap-ready marker, Docker active, Zeek 9.0.1 available, and capture-interface MTU 9001. HTTPS bootstrap required the existing lab inspection public CA, verified against an existing host's trust store and installed only on this new sensor. TLS and package integrity verification remain enabled. No original lab configuration was changed.
+
+The old one-to-eight-hour uptime parameter has been removed. The active AWS schedule is `at(2026-11-06T17:05:00)` in `America/Chicago`, enabled with its flexible window off. It targets the exact experimental stack ARN for deletion. The sensor independently reports its next systemd stop at `2026-11-06 23:10:00 UTC` (Friday 5:10 p.m. Central). These allow the approved run through 5 p.m.; neither stops it early.
+
+The cleanup execution role allows deletion only of enumerated experiment-owned resources and includes the actual mirror session. A separate non-compute canary stack was successfully deleted by that scheduler role; CloudTrail verified the caller. Instance termination and mirror-session/target deletion authorization are additionally checked by IAM simulation, not by deleting the active experiment. A 5:20 p.m. Central follow-up is scheduled to verify deletion and remove the cleanup controller. Future agent access is not guaranteed; the primary AWS schedule operates independently.
+
+The approved incremental ceiling is $30. Approximately 44.5 hours at the verified instance, 100-GiB storage and one-session rates projects about $18.3 before transfer and other charges. This is an estimate, not an AWS-enforced spending cap. Stopping an instance leaves storage and mirror-session charges; verify actual stack/resource deletion and inspect the scheduler dead-letter queue on any failure. No changes are planned after Friday 9 a.m. Central.
+
+The sensor captures only when its bounded test helper is invoked; this is not continuous recording or a running Malcolm UI. Preserve native Zeek JSON. CEF/syslog and JSON/Kafka remain future Broker transport options; neither forwarding nor XDM changes have been configured.
+
+### Live acceptance caveat
+
+The deliberate DNS marker was recovered in Zeek JSON with the expected inner source and resolver addresses. The cross-VPC HTTP request timed out and is not an acceptance pass. The first capture exceeded its intended 60 seconds: kernel audit logs show AppArmor denied timeout/termination signals from the snap-packaged SSM agent to tcpdump. The new sensor was rebooted to end the test without weakening AppArmor; capture lifecycle validation remains open. A stronger timeout alone is not a verified correction for that policy interaction. Do not treat this as a continuous or fully accepted capture service.

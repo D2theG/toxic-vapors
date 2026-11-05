@@ -19,9 +19,12 @@ assert not any(x['Type'] in ('AWS::EC2::Route','AWS::EC2::Subnet','AWS::EC2::VPC
 assert r['SensorRole']['Properties']['ManagedPolicyArns']==[{'Fn::Sub':'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'}]
 u=s['UserData']['Fn::Base64']['Fn::Sub']
 assert u.index('systemctl enable --now mirror-lab-stop.timer') < u.index('apt-get update')
-assert 'timeout --signal=INT 60' in u and '-C 100 -W 4' in u
+assert 'timeout --signal=TERM --kill-after=5 60' in u and '-C 100 -W 4' in u
+assert 'OnCalendar=${ShutdownAtUtc}' in u and 'Persistent=true' in u
+assert 'https://archive.ubuntu.com/ubuntu' in u
+assert 'curl -k' not in u and 'trusted=yes' not in u and '--allow-unauthenticated' not in u
 with tempfile.NamedTemporaryFile(mode='w',suffix='.sh') as f:
- f.write(u.replace('${AutoShutdownMinutes}','240').replace('${SourceIpv4Cidr}','10.100.1.4/32'));f.flush();subprocess.run(['bash','-n',f.name],check=True)
+ f.write(u.replace('${ShutdownAtUtc}','2026-11-06 23:10:00 UTC').replace('${SourceIpv4Cidr}','10.100.1.4/32'));f.flush();subprocess.run(['bash','-n',f.name],check=True)
 print('PASS: opt-in mirroring, target wiring, scoped ingress, encrypted ephemeral disk, IMDSv2, isolated resources, SSM-only IAM, early cost timer, bounded capture, shell syntax and size.')
 # Check actual Zeek output when present; the fixture generator sends no traffic.
 z=root/'tests'/'zeek-output'

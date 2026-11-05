@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Read-only preflight. Uses the approved isolated CLI; never deploys or logs credentials."""
-import argparse, ipaddress, json, pathlib, shutil, subprocess
+import argparse, datetime, ipaddress, json, pathlib, shutil, subprocess
 
 p=argparse.ArgumentParser()
 p.add_argument('--parameters',default=str(pathlib.Path(__file__).with_name('parameters.observed.json')))
@@ -11,6 +11,8 @@ p.add_argument('--docker',default=shutil.which('docker') or '/Users/dustingabel/
 p.add_argument('--auth-volume',default='aws-fed-cortex-demo-auth')
 a=p.parse_args()
 params={x['ParameterKey']:x['ParameterValue'] for x in json.load(open(a.parameters))}
+deadline=datetime.datetime.strptime(params['ShutdownAtUtc'],'%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=datetime.timezone.utc)
+if deadline <= datetime.datetime.now(datetime.timezone.utc):raise SystemExit('BLOCKED: backup shutdown deadline must be in the future.')
 base=[a.docker,'run','--rm','-e','AWS_PAGER=','-v',a.auth_volume+':/root/.aws','public.ecr.aws/aws-cli/aws-cli:latest']
 def aws(*args):
     r=subprocess.run(base+list(args)+['--profile',a.profile,'--region',a.region,'--output','json'],capture_output=True,text=True)

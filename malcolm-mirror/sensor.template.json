@@ -73,12 +73,18 @@
       "MinValue": 100,
       "MaxValue": 200
     },
-    "AutoShutdownMinutes": {
-      "Type": "Number",
-      "Default": 240,
-      "MinValue": 60,
-      "MaxValue": 480,
-      "Description": "New sensor stops after this uptime. Mirror billing still requires session deletion."
+    "ShutdownAtUtc": {
+      "Type": "String",
+      "Default": "2026-11-06 23:10:00 UTC",
+      "AllowedPattern": "[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} UTC",
+      "Description": "Absolute UTC backup stop time, after scheduled teardown; persists across reboot."
+    },
+    "InspectionCaBase64": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "[A-Za-z0-9+/=]*",
+      "MaxLength": 4096,
+      "Description": "Optional base64 public PEM inspection CA from a verified existing trust store; never supply a private key."
     }
   },
   "Conditions": {
@@ -273,7 +279,7 @@
         ],
         "UserData": {
           "Fn::Base64": {
-            "Fn::Sub": "#!/bin/bash\nset -euo pipefail\numask 077\ninstall -d -m 0700 /var/lib/mirror-lab /var/lib/mirror-lab/capture\nexec > >(tee -a /var/log/mirror-lab-bootstrap.log) 2>&1\ntrap 'touch /var/lib/mirror-lab/BOOTSTRAP_FAILED' ERR\ncat > /etc/systemd/system/mirror-lab-stop.service <<'UNIT'\n[Unit]\nDescription=Stop disposable mirror lab sensor\n[Service]\nType=oneshot\nExecStart=/usr/bin/systemctl poweroff\nUNIT\ncat > /etc/systemd/system/mirror-lab-stop.timer <<'UNIT'\n[Unit]\nDescription=Bound sensor running time after each boot\n[Timer]\nOnBootSec=${AutoShutdownMinutes}min\nUnit=mirror-lab-stop.service\n[Install]\nWantedBy=timers.target\nUNIT\nsystemctl daemon-reload\nsystemctl enable --now mirror-lab-stop.timer\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y --no-install-recommends tcpdump docker.io docker-compose-v2 curl unzip python3 python3-dialog python3-dotenv python3-pip python3-ruamel.yaml\nsystemctl enable --now docker\nsnap start amazon-ssm-agent\n# No key pair, passwords, tokens, or Malcolm authentication are generated here.\ndocker pull zeek/zeek@sha256:71c1d6b61cdcc25d306c091d32b3da15583485c0c9dfc45cdff48b088cdfdc92\ncat > /usr/local/sbin/mirror-capture-test <<'CAPTURE'\n#!/bin/bash\nset -euo pipefail\numask 077\niface=$(ip -o route get $(echo ${SourceIpv4Cidr} | cut -d/ -f1) | awk '{for (i=1;i<=NF;i++) if ($i==\"dev\") {print $(i+1); exit}}')\ntest -n \"$iface\"\n# Scope is outer VXLAN only, one 60-second run, four ~100 MB ring files.\n# Use a new directory per run; old runs must be removed before repeated testing.\nrun=$(mktemp -d /var/lib/mirror-lab/capture/test.XXXXXX)\necho \"Capture directory: $run; interface: $iface\"\nset +e\ntimeout --signal=INT 60 tcpdump -i \"$iface\" -nn -s 0 -U -C 100 -W 4 -Z root -w \"$run/mirror.pcap\" 'udp dst port 4789'\nrc=$?\nset -e\nif [ \"$rc\" != 0 ] && [ \"$rc\" != 124 ]; then exit \"$rc\"; fi\nchmod 0600 \"$run\"/*\necho \"Capture finished. Inspect packet and dropped counts above.\"\nCAPTURE\nchmod 0700 /usr/local/sbin/mirror-capture-test\n# Stack CREATE_COMPLETE only establishes provisioning; this marker is a separate readiness check.\ntouch /var/lib/mirror-lab/BOOTSTRAP_READY\n"
+            "Fn::Sub": "#!/bin/bash\nset -euo pipefail\numask 077\ninstall -d -m 0700 /var/lib/mirror-lab /var/lib/mirror-lab/capture\nexec > >(tee -a /var/log/mirror-lab-bootstrap.log) 2>&1\nrm -f /var/lib/mirror-lab/BOOTSTRAP_READY /var/lib/mirror-lab/BOOTSTRAP_FAILED\ntrap 'touch /var/lib/mirror-lab/BOOTSTRAP_FAILED' ERR\ncat > /etc/systemd/system/mirror-lab-stop.service <<'UNIT'\n[Unit]\nDescription=Stop disposable mirror lab sensor\n[Service]\nType=oneshot\nExecStart=/usr/bin/systemctl poweroff\nUNIT\ncat > /etc/systemd/system/mirror-lab-stop.timer <<'UNIT'\n[Unit]\nDescription=Stop sensor at the approved absolute deadline\n[Timer]\nOnCalendar=${ShutdownAtUtc}\nPersistent=true\nUnit=mirror-lab-stop.service\n[Install]\nWantedBy=timers.target\nUNIT\nsystemctl daemon-reload\nsystemctl enable --now mirror-lab-stop.timer\nif [ -n '${InspectionCaBase64}' ]; then\n  printf '%s' '${InspectionCaBase64}' | base64 -d > /usr/local/share/ca-certificates/mirror-lab-fortigate.crt\n  openssl x509 -in /usr/local/share/ca-certificates/mirror-lab-fortigate.crt -noout -fingerprint -sha256\n  update-ca-certificates\nfi\n# Preserve TLS and package signature/hash checks; use the official HTTPS repositories.\nsed -i -E 's|http://([a-z0-9.-]+\\.)?archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g;s|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources\nexport DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y --no-install-recommends tcpdump docker.io docker-compose-v2 curl unzip python3 python3-dialog python3-dotenv python3-pip python3-ruamel.yaml\nsystemctl enable --now docker\nsnap start amazon-ssm-agent\n# No key pair, passwords, tokens, or Malcolm authentication are generated here.\ndocker pull zeek/zeek@sha256:71c1d6b61cdcc25d306c091d32b3da15583485c0c9dfc45cdff48b088cdfdc92\ncat > /usr/local/sbin/mirror-capture-test <<'CAPTURE'\n#!/bin/bash\nset -euo pipefail\numask 077\niface=$(ip -o route get $(echo ${SourceIpv4Cidr} | cut -d/ -f1) | awk '{for (i=1;i<=NF;i++) if ($i==\"dev\") {print $(i+1); exit}}')\ntest -n \"$iface\"\n# Scope is outer VXLAN only, one 60-second run, four ~100 MB ring files.\n# Use a new directory per run; old runs must be removed before repeated testing.\nrun=$(mktemp -d /var/lib/mirror-lab/capture/test.XXXXXX)\necho \"Capture directory: $run; interface: $iface\"\nset +e\ntimeout --signal=TERM --kill-after=5 60 tcpdump -i \"$iface\" -nn -s 0 -U -C 100 -W 4 -Z root -w \"$run/mirror.pcap\" 'udp dst port 4789'\nrc=$?\nset -e\nif [ \"$rc\" != 0 ] && [ \"$rc\" != 124 ]; then exit \"$rc\"; fi\nchmod 0600 \"$run\"/*\necho \"Capture finished. Inspect packet and dropped counts above.\"\nCAPTURE\nchmod 0700 /usr/local/sbin/mirror-capture-test\n# Stack CREATE_COMPLETE only establishes provisioning; this marker is a separate readiness check.\ntouch /var/lib/mirror-lab/BOOTSTRAP_READY\n"
           }
         },
         "Tags": [

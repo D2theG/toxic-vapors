@@ -40,7 +40,7 @@
     "ParameterValue": "100"
   },
   {
-    "ParameterKey": "AutoShutdownMinutes",
-    "ParameterValue": "240"
+    "ParameterKey": "ShutdownAtUtc",
+    "ParameterValue": "2026-11-06 23:10:00 UTC"
   }
 ]
