@@ -41,7 +41,7 @@
     "synthetic": true
   },
   "not_run": [
-    "Authenticated Malcolm browser UI and dashboard visual acceptance",
+    "Malcolm dashboard visual acceptance",
     "XSIAM ingest/model/detection validation",
     "Sustained capture throughput"
   ],
@@ -84,7 +84,7 @@
     "timed_out": false,
     "exact_dns_http_markers": "Present in Zeek and Arkime; HTTP 404 matches client",
     "unauthenticated_loopback_https_status": 401,
-    "authenticated_browser": "Pending user confirmation",
+    "authenticated_browser": "Successful private sign-in confirmed by user",
     "false_readiness_flags": [
       "extracted_files",
       "filebeat_tcp",

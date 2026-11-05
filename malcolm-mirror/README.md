@@ -154,7 +154,7 @@ After base acceptance, use the verified download helper on the new sensor as `ub
 
 Follow the installer reboot instruction; reconnect by SSM, start Malcolm and verify `scripts/status` plus the authenticated UI. Reach HTTPS through Session Manager port forwarding to the new instance's port 443, for example with `AWS-StartPortForwardingSession` local port 8443. This requires the Session Manager client/plugin on the operator workstation or another approved access method; do not open the sensor security group to work around missing tooling. No host plugin was installed by this work. No HTTPS ingress rule is needed for an SSM tunnel.
 
-This stage was subsequently runtime-tested: all 27 containers are healthy and a controlled PCAP was indexed. Authenticated browser UI acceptance is still pending; see the current status below. Zeek output is not automatically Corelight output, and neither this stack nor Malcolm setup configures XSIAM ingestion or validates its content pack/model rules.
+This stage was subsequently runtime-tested: all 27 containers are healthy and a controlled PCAP was indexed. The user subsequently confirmed browser sign-in; visual dashboard inspection remains pending. Zeek output is not automatically Corelight output, and neither this stack nor Malcolm setup configures XSIAM ingestion or validates its content pack/model rules.
 
 ## Cost and teardown
 
@@ -216,6 +216,6 @@ At 04:14 UTC on November 5, all 27 Malcolm 26.10.0 containers were healthy, incl
 
 The existing 33,962-byte bounded capture was imported once. The document API returned exactly 93 indexed records (70 Zeek, 11 Arkime, 12 Suricata), with both shards successful and no timeout. Exact DNS and HTTP markers appear in both Zeek and Arkime; HTTP status 404 matches the test client. This verifies capture-to-index processing, not sustained throughput or an XSIAM integration.
 
-The HTTPS listener remains loopback-only. An ARM64 Docker-isolated Session Manager client exposes it locally; an unauthenticated request returns the expected HTTP 401. No host plugin was installed. Private administrator browser sign-in and visual dashboard inspection remain pending. At the final snapshot, 70 GiB disk and 5 GiB RAM were available. Core ingestion readiness and NetBox were true; extracted-files, filebeat-TCP and filescan API flags were false, so those optional paths are not accepted by this test even though containers are healthy.
+The HTTPS listener remains loopback-only. An ARM64 Docker-isolated Session Manager client exposes it locally; an unauthenticated request returns the expected HTTP 401. No host plugin was installed. The user confirmed successful private administrator browser sign-in. Visual dashboard inspection remains pending. At the final snapshot, 70 GiB disk and 5 GiB RAM were available. Core ingestion readiness and NetBox were true; extracted-files, filebeat-TCP and filescan API flags were false, so those optional paths are not accepted by this test even though containers are healthy.
 
 Malcolm live capture/interface tweaks remain disabled. No Broker forwarding or XDM changes were made. The approved Friday teardown schedule and budget remain unchanged. Historical setup steps and exact validation boundaries are preserved in [VALIDATION.md](VALIDATION.md).
