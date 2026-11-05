@@ -64,3 +64,15 @@ pgrep -a tcpdump  # should return no process after the bounded helper finishes
 ```
 
 Use the README's isolated Zeek command on the resulting **closed** PCAP. Match the chosen marker in `http.log`/`dns.log`, then join its `uid` to `conn.log` and check `tunnel_parents`, `conn_state`, `orig_pkts`, and `resp_pkts`. Compare against the client command's HTTP status or DNS response. Do not use unrelated background HTTP records as proof that a particular attempted connection succeeded.
+
+## Full Malcolm application status (2026-11-05, 03:04–03:08 UTC)
+
+The sensor inventory showed no Malcolm containers or port-443 listener; only the standalone Zeek image was installed. This is not a healthy/access-ready full Malcolm deployment.
+
+Completed safely: downloaded the pinned 26.10.0 installer on the sensor; SHA-256 matched the documented release hash. Extracted the verified application archive to `/home/ubuntu/Malcolm` as the `ubuntu` user, rejecting unsafe archive members. Official `install.py --configure --non-interactive --defaults --dry-run --skip-splash` completed successfully. No full Malcolm images were pulled and no services started.
+
+**Blocker:** automatic approval review rejected the subsequent configuration-only command because it may write credential-bearing settings and the authorized scope explicitly excluded credential generation. The rejected command would have written default configuration, restricted the future HTTPS UI bind to loopback, and validated Compose without starting containers. It did not execute. No alternative execution path was attempted. Configuration, host tuning, authentication, image pulls, container health, UI access and PCAP import acceptance remain incomplete.
+
+The proposed next step requires explicit approval for Malcolm configuration that may write credential-bearing settings. The user should perform `./scripts/auth_setup` privately in `/home/ubuntu/Malcolm` when that configuration is ready; never paste passwords into chat or log them through Run Command. Existing capture service behavior, Friday timers, network exposure, and the original lab remain unchanged.
+
+The official [quick start](https://malcolm.fyi/docs/quickstart.html) requires authentication setup before image pulls, and [authentication documentation](https://malcolm.fyi/docs/authsetup.html) requires it before first startup. Do not disable authentication to bypass this step. Once authorized and authenticated, verify `scripts/status`, localhost HTTPS, private browser access, and imported test PCAP inner HTTP/DNS records before calling Malcolm ready. No Broker forwarding is part of that acceptance.
