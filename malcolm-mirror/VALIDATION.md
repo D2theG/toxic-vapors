@@ -90,3 +90,7 @@ With this materially new evidence, the exact previously unexecuted command was s
 - `vm.max_map_count=1048576`; the `ubuntu` account is not in the Docker group. Configuration-only mode did not perform host tuning or daemon-access setup.
 
 The previous configuration approval blocker is resolved. Remaining work is operator authentication plus required host access/tuning, image pulls, service health, private browser access, and controlled PCAP import. Do not start with placeholders. The successful Zeek capture and existing lab were not changed by this step.
+
+### Approved private-authentication prerequisites
+
+After explicit user approval, `ubuntu` was added to the sensor's existing Docker group and `apache2-utils` installed. A fresh process as `ubuntu` successfully read Docker server version 29.1.3, `htpasswd` resolved to `/usr/bin/htpasswd`, and Compose configuration validation passed. The installer reported no service/container restart required; the Friday stop timer remains active. No authentication command ran and no credentials were generated. The approved prior setup-status diff was published to the existing PR.
