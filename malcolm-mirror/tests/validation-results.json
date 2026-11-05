@@ -1,0 +1,96 @@
+{
+  "template_bytes": 16291,
+  "cfn_lint": {
+    "version": "1.59.0",
+    "region": "us-east-2",
+    "findings": []
+  },
+  "cfn_guard": {
+    "version": "3.2.1",
+    "result": {
+      "name": "/work/sensor.template.json",
+      "metadata": {},
+      "status": "PASS",
+      "not_compliant": [],
+      "not_applicable": [],
+      "compliant": [
+        "encrypted_disposable_root",
+        "explicit_passive_target",
+        "include_amazon_dns",
+        "no_inbound_admin",
+        "opt_in_capture",
+        "require_imdsv2"
+      ]
+    },
+    "scope": "Initial template; covered resource properties unchanged by bootstrap-only correction"
+  },
+  "aws_validate_template": {
+    "status": "PASS",
+    "capabilities": [
+      "CAPABILITY_IAM"
+    ],
+    "scope": "Initial explicit API check; revised template accepted by CloudFormation change set"
+  },
+  "offline_zeek": {
+    "version": "9.0.1",
+    "platform": "linux/arm64",
+    "network": "none",
+    "http": "inner GET /mirror-lab-test, HTTP 200",
+    "dns": "inner example.com A, NOERROR, 192.0.2.10",
+    "connection": "inner HTTP/DNS records with VXLAN tunnel parent",
+    "synthetic": true
+  },
+  "not_run": [
+    "Malcolm dashboard visual acceptance",
+    "XSIAM ingest/model/detection validation",
+    "Sustained capture throughput"
+  ],
+  "initial_preparation_checked_at_utc": "2026-11-05T02:17:00.301757+00:00",
+  "initial_template_sha256": "69cab075d229dac1df3e9d0b18a3e9cd6ba0204423add4ba5eab8f3dd48c2ecd",
+  "checked_at_utc": "2026-11-05T03:01:24.641046+00:00",
+  "template_sha256": "1df73e04e82acbdbd129a66b2b23c7322ee00022a73bdf82bf7baab5929be4a8",
+  "live_zeek": {
+    "version": "9.0.1",
+    "platform": "linux/amd64",
+    "capture_started_utc": "2026-11-05T02:57:39Z",
+    "capture_ended_utc": "2026-11-05T02:58:39Z",
+    "packets_captured": 115,
+    "kernel_drops": 0,
+    "http": "Exact outbound marker and HTTP 404 match curl",
+    "dns": "Exact marker and NOERROR/no answers match client",
+    "cross_vpc_inbound_http": "Timed out; expected tuple absent from this capture; cause unconfirmed"
+  },
+  "final_helper_test": {
+    "ssm_elapsed_seconds": 60.085,
+    "exit_status": 0,
+    "packets_captured": 51,
+    "kernel_drops": 0,
+    "apparmor": "Enforced, unchanged"
+  },
+  "malcolm_application": {
+    "checked_at_utc": "2026-11-05T04:14:41Z",
+    "release": "26.10.0",
+    "running_containers": 27,
+    "healthy_containers": 27,
+    "authentication": "User completed privately; metadata only inspected",
+    "pcap_bytes": 33962,
+    "indexed_documents": 93,
+    "provider_counts": {
+      "Zeek": 70,
+      "Arkime": 11,
+      "Suricata": 12
+    },
+    "failed_shards": 0,
+    "timed_out": false,
+    "exact_dns_http_markers": "Present in Zeek and Arkime; HTTP 404 matches client",
+    "unauthenticated_loopback_https_status": 401,
+    "authenticated_browser": "Successful private sign-in confirmed by user",
+    "false_readiness_flags": [
+      "extracted_files",
+      "filebeat_tcp",
+      "filescan"
+    ],
+    "disk_available_gib": 70,
+    "ram_available_gib_approx": 5
+  }
+}
