@@ -1,0 +1,46 @@
+[
+  {
+    "ParameterKey": "EnvironmentName",
+    "ParameterValue": "fed-cortex-demo"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-REPLACE"
+  },
+  {
+    "ParameterKey": "SensorSubnetId",
+    "ParameterValue": "subnet-REPLACE"
+  },
+  {
+    "ParameterKey": "SourceEniId",
+    "ParameterValue": "eni-REPLACE"
+  },
+  {
+    "ParameterKey": "SourceIpv4Cidr",
+    "ParameterValue": "10.0.1.10/32"
+  },
+  {
+    "ParameterKey": "ResolverIpv4Cidr",
+    "ParameterValue": "10.0.0.2/32"
+  },
+  {
+    "ParameterKey": "UbuntuAmiId",
+    "ParameterValue": "ami-REPLACE"
+  },
+  {
+    "ParameterKey": "EnableMirroring",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "SessionNumber",
+    "ParameterValue": "100"
+  },
+  {
+    "ParameterKey": "VolumeGiB",
+    "ParameterValue": "100"
+  },
+  {
+    "ParameterKey": "AutoShutdownMinutes",
+    "ParameterValue": "240"
+  }
+]

@@ -1,0 +1,49 @@
+{
+  "checked_at_utc": "2026-11-05T02:17:00.301757+00:00",
+  "template_sha256": "69cab075d229dac1df3e9d0b18a3e9cd6ba0204423add4ba5eab8f3dd48c2ecd",
+  "template_bytes": 14507,
+  "cfn_lint": {
+    "version": "1.59.0",
+    "region": "us-east-2",
+    "findings": []
+  },
+  "cfn_guard": {
+    "version": "3.2.1",
+    "result": {
+      "name": "/work/sensor.template.json",
+      "metadata": {},
+      "status": "PASS",
+      "not_compliant": [],
+      "not_applicable": [],
+      "compliant": [
+        "encrypted_disposable_root",
+        "explicit_passive_target",
+        "include_amazon_dns",
+        "no_inbound_admin",
+        "opt_in_capture",
+        "require_imdsv2"
+      ]
+    }
+  },
+  "aws_validate_template": {
+    "status": "PASS",
+    "capabilities": [
+      "CAPABILITY_IAM"
+    ]
+  },
+  "offline_zeek": {
+    "version": "9.0.1",
+    "platform": "linux/arm64",
+    "network": "none",
+    "http": "inner GET /mirror-lab-test, HTTP 200",
+    "dns": "inner example.com A, NOERROR, 192.0.2.10",
+    "connection": "inner HTTP/DNS records with VXLAN tunnel parent",
+    "synthetic": true
+  },
+  "not_run": [
+    "AWS deployment or change-set predeployment validation",
+    "Live mirrored traffic capture",
+    "Malcolm installation/authentication/UI",
+    "XSIAM ingest/model/detection validation"
+  ]
+}

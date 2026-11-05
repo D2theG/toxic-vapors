@@ -1,0 +1,27 @@
+# Focused lab checks, not a general compliance certification.
+rule require_imdsv2 {
+  Resources.Sensor.Properties.MetadataOptions.HttpTokens == "required"
+}
+rule encrypted_disposable_root {
+  Resources.Sensor.Properties.BlockDeviceMappings[0].Ebs.Encrypted == true
+  Resources.Sensor.Properties.BlockDeviceMappings[0].Ebs.DeleteOnTermination == true
+}
+rule no_inbound_admin {
+  Resources.SensorSecurityGroup.Properties.SecurityGroupIngress[0].IpProtocol == "udp"
+  Resources.SensorSecurityGroup.Properties.SecurityGroupIngress[0].FromPort == 4789
+  Resources.SensorSecurityGroup.Properties.SecurityGroupIngress[0].ToPort == 4789
+  Resources.SensorSecurityGroup.Properties.SecurityGroupIngress[0].CidrIp.Ref == "SourceIpv4Cidr"
+  Resources.Sensor.Properties.KeyName !exists
+}
+rule opt_in_capture {
+  Parameters.EnableMirroring.Default == "false"
+  Resources.MirrorSession.Condition == "MirroringEnabled"
+  Resources.MirrorSession.Properties.PacketLength !exists
+}
+rule explicit_passive_target {
+  Resources.MirrorTarget.Properties.NetworkInterfaceId.Ref == "SensorEni"
+  Resources.SensorEni.Properties.SourceDestCheck == true
+}
+rule include_amazon_dns {
+  Resources.MirrorFilter.Properties.NetworkServices[0] == "amazon-dns"
+}

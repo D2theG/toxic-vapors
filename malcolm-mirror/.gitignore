@@ -1,0 +1,9 @@
+parameters.observed.json
+parameters.enabled.json
+observed-topology.json
+evidence-private/
+__pycache__/
+*.pyc
+tests/*.pcap
+tests/zeek-output/
+tests/bootstrap-rendered.sh
