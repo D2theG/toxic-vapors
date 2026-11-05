@@ -1,6 +1,6 @@
 # Passive Malcolm / Zeek traffic-mirroring lab
 
-**Capture foundation deployed on 2026-11-05; live acceptance is in progress.** This is a separate, disposable CloudFormation stack. It adds a private capture sensor to an existing workload subnet and can mirror one existing EC2 ENI after explicit enablement. It does not update the large FortiGate template, existing routes/security groups/instances, or XSIAM configuration. This is an optional lab experiment, not a dependency for the Friday demo.
+**Capture foundation deployed on 2026-11-05; controlled Zeek HTTP/DNS acceptance passed.** This is a separate, disposable CloudFormation stack. It adds a private capture sensor to an existing workload subnet and can mirror one existing EC2 ENI after explicit enablement. It does not update the large FortiGate template, existing routes/security groups/instances, or XSIAM configuration. This is an optional lab experiment, not a dependency for the Friday demo.
 
 ## Why a separate stack
 
@@ -22,7 +22,7 @@ flowchart LR
   PCAP --> Malcolm[Optional Malcolm artifact analysis]
 ```
 
-Read-only inspection on **2026-11-05** confirmed the main lab stack is `UPDATE_COMPLETE` in `us-east-2`. The selected DVWA source is a running `t3.micro`, with an ordinary attached ENI in the first workload VPC and `us-east-2a`. The proposed sensor uses the same subnet/AZ. Its subnet has an active VPC-local route and an active default route to the existing TGW. The subnet ACL allows IPv4 traffic in both directions, and the VPC uses AmazonProvidedDNS. Before deployment, no mirror sessions were returned by the complete `us-east-2` session listing. One experimental session has since been enabled. Existing SSM-managed hosts in this subnet were Online; The new sensor subsequently completed bootstrap and SSM readiness; see the deployment evidence below.
+Read-only inspection on **2026-11-05** confirmed the main lab stack is `UPDATE_COMPLETE` in `us-east-2`. The selected DVWA source is a running `t3.micro`, with an ordinary attached ENI in the first workload VPC and `us-east-2a`. The deployed sensor uses the same subnet/AZ. Its subnet has an active VPC-local route and an active default route to the existing TGW. The subnet ACL allows IPv4 traffic in both directions, and the VPC uses AmazonProvidedDNS. Before deployment, no mirror sessions were returned by the complete `us-east-2` session listing. One experimental session has since been enabled. Existing SSM-managed hosts in this subnet were Online. The new sensor subsequently completed bootstrap and SSM readiness; see the deployment evidence below.
 
 Same-subnet capture avoids sending mirrored packets through the TGW/FortiGate and avoids NLB/GWLB costs. Bootstrap and SSM still depend on the existing outbound inspection/NAT path. Do not change that path to make this experiment work before the demo. If bootstrap is blocked, leave mirroring disabled and stop/defer the experiment.
 
@@ -122,7 +122,7 @@ sudo /usr/local/sbin/mirror-capture-test
 
 This selects the interface on the source's local route, captures only outer UDP 4789, runs for 60 seconds and rotates through four approximately 100-MB files. Each run has a new root-only directory. **Repeated runs accumulate directories**; retain only the needed test and remove superseded captures. It is a bounded test, not an unattended recorder. Review tcpdump packet/drop counts.
 
-During that minute, manually issue a benign HTTP request to the existing DVWA host from an existing permitted test client (`curl --max-time 5 'http://SOURCE_PRIVATE_IP/?mirror-demo=UNIQUE_MARKER'`). On the mirrored host, an uncached DNS lookup such as `getent ahostsv4 mirror-UNIQUE_MARKER.example.com` exercises its configured resolver; NXDOMAIN is an acceptable expected response. Use existing tools only. No exploits, scans, attacks, model changes or source-host package installs are required. These commands were not executed during initial preparation; live test results are tracked separately.
+The verified HTTP test uses an outbound request from the mirrored host: `curl --max-time 8 http://example.com/mirror-UNIQUE_MARKER`. A 404 for that marker still validates request/response decoding. The original inbound cross-VPC path remains unverified. During that minute, optionally issue a benign HTTP request to the existing DVWA host from an existing permitted test client (`curl --max-time 5 'http://SOURCE_PRIVATE_IP/?mirror-demo=UNIQUE_MARKER'`). On the mirrored host, an uncached DNS lookup such as `getent ahostsv4 mirror-UNIQUE_MARKER.example.com` exercises its configured resolver; NXDOMAIN is an acceptable expected response. Use existing tools only. No exploits, scans, attacks, model changes or source-host package installs are required. These commands were not executed during initial preparation; live test results are tracked separately.
 
 Analyze a completed PCAP on the sensor (replace paths with the actual closed file; the ring names end in a digit):
 
@@ -144,7 +144,7 @@ Pass criteria:
 3. `dns.log` shows the mirrored host, expected resolver, exact test query and response/rcode. A DNS lookup made only on an unmirrored host is not a valid test.
 4. `conn.log` links inner sessions to a VXLAN tunnel parent. Compare timestamps and tuples with the deliberate requests. TLS remains encrypted; mirroring does not decrypt HTTPS or export FortiGate's decrypted inspection stream.
 5. If Malcolm is configured, import the small PCAP and verify its Zeek HTTP/DNS views display the inner records. Outer VXLAN visibility alone is insufficient. Malcolm/Arkime UI behavior has not been tested by this preparation.
-6. Disable/delete the mirror session after testing. Existing lab traffic should continue as before; do not change its routes or model rules to address capture gaps.
+6. Disable/delete the mirror session at the end of the approved runtime (Friday after 5 p.m. Central for this run). Existing lab traffic should continue as before; do not change its routes or model rules to address capture gaps.
 
 ## Optional Malcolm installation
 
@@ -179,7 +179,7 @@ Teardown order:
 
 ## Validation evidence and limits
 
-See [VALIDATION.md](VALIDATION.md). Local parser/guard/shell checks, AWS `validate-template`, read-only preflight, and an actual offline Zeek VXLAN fixture are separate layers. None proves live packet delivery or Malcolm startup. That statement described initial preparation only. The authorized sensor and mirror session are now deployed; tenant configuration remains unchanged. Live capture acceptance is still being evaluated.
+See [VALIDATION.md](VALIDATION.md). Local parser/guard/shell checks, AWS `validate-template`, read-only preflight, and an actual offline Zeek VXLAN fixture are separate layers. None proves live packet delivery or Malcolm startup. That statement described initial preparation only. The authorized sensor and mirror session are now deployed; tenant configuration remains unchanged. Controlled live HTTP/DNS capture acceptance passed; the cross-VPC inbound path and full Malcolm UI remain unverified.
 
 ## References
 
@@ -204,6 +204,8 @@ The approved incremental ceiling is $30. Approximately 44.5 hours at the verifie
 
 The sensor captures only when its bounded test helper is invoked; this is not continuous recording or a running Malcolm UI. Preserve native Zeek JSON. CEF/syslog and JSON/Kafka remain future Broker transport options; neither forwarding nor XDM changes have been configured.
 
-### Live acceptance caveat
+### Live acceptance outcome
 
-The deliberate DNS marker was recovered in Zeek JSON with the expected inner source and resolver addresses. The cross-VPC HTTP request timed out and is not an acceptance pass. The first capture exceeded its intended 60 seconds: kernel audit logs show AppArmor denied timeout/termination signals from the snap-packaged SSM agent to tcpdump. The new sensor was rebooted to end the test without weakening AppArmor; capture lifecycle validation remains open. A stronger timeout alone is not a verified correction for that policy interaction. Do not treat this as a continuous or fully accepted capture service.
+Systemd-managed capture stopped after exactly 60 seconds with 115 packets and zero kernel drops. Zeek recovered the deliberate DNS marker and outbound HTTP marker, including the matching HTTP 404 response and inner endpoints. The helper now uses the service manager for lifecycle while retaining AppArmor enforcement. The initial direct `timeout` from snap SSM was blocked by AppArmor; that failed run was ended by rebooting only the sensor. See [VALIDATION.md](VALIDATION.md) for timestamps, observed responses and limitations.
+
+The cross-VPC HTTP request still timed out, although DVWA returns 302 locally. Its expected tuple was not present in the controlled capture; the blocking point is unconfirmed. No original lab configuration was changed to repair it. This is a successful controlled outbound HTTP/DNS capture test, not full Malcolm UI, continuous recording, or Broker ingestion acceptance.

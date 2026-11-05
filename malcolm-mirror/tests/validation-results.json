@@ -1,7 +1,5 @@
 {
-  "checked_at_utc": "2026-11-05T02:17:00.301757+00:00",
-  "template_sha256": "69cab075d229dac1df3e9d0b18a3e9cd6ba0204423add4ba5eab8f3dd48c2ecd",
-  "template_bytes": 14507,
+  "template_bytes": 16291,
   "cfn_lint": {
     "version": "1.59.0",
     "region": "us-east-2",
@@ -23,13 +21,15 @@
         "opt_in_capture",
         "require_imdsv2"
       ]
-    }
+    },
+    "scope": "Initial template; covered resource properties unchanged by bootstrap-only correction"
   },
   "aws_validate_template": {
     "status": "PASS",
     "capabilities": [
       "CAPABILITY_IAM"
-    ]
+    ],
+    "scope": "Initial explicit API check; revised template accepted by CloudFormation change set"
   },
   "offline_zeek": {
     "version": "9.0.1",
@@ -41,9 +41,30 @@
     "synthetic": true
   },
   "not_run": [
-    "AWS deployment or change-set predeployment validation",
-    "Live mirrored traffic capture",
     "Malcolm installation/authentication/UI",
-    "XSIAM ingest/model/detection validation"
-  ]
+    "XSIAM ingest/model/detection validation",
+    "Sustained capture throughput"
+  ],
+  "initial_preparation_checked_at_utc": "2026-11-05T02:17:00.301757+00:00",
+  "initial_template_sha256": "69cab075d229dac1df3e9d0b18a3e9cd6ba0204423add4ba5eab8f3dd48c2ecd",
+  "checked_at_utc": "2026-11-05T03:01:24.641046+00:00",
+  "template_sha256": "1df73e04e82acbdbd129a66b2b23c7322ee00022a73bdf82bf7baab5929be4a8",
+  "live_zeek": {
+    "version": "9.0.1",
+    "platform": "linux/amd64",
+    "capture_started_utc": "2026-11-05T02:57:39Z",
+    "capture_ended_utc": "2026-11-05T02:58:39Z",
+    "packets_captured": 115,
+    "kernel_drops": 0,
+    "http": "Exact outbound marker and HTTP 404 match curl",
+    "dns": "Exact marker and NOERROR/no answers match client",
+    "cross_vpc_inbound_http": "Timed out; expected tuple absent from this capture; cause unconfirmed"
+  },
+  "final_helper_test": {
+    "ssm_elapsed_seconds": 60.085,
+    "exit_status": 0,
+    "packets_captured": 51,
+    "kernel_drops": 0,
+    "apparmor": "Enforced, unchanged"
+  }
 }

@@ -19,7 +19,8 @@ assert not any(x['Type'] in ('AWS::EC2::Route','AWS::EC2::Subnet','AWS::EC2::VPC
 assert r['SensorRole']['Properties']['ManagedPolicyArns']==[{'Fn::Sub':'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'}]
 u=s['UserData']['Fn::Base64']['Fn::Sub']
 assert u.index('systemctl enable --now mirror-lab-stop.timer') < u.index('apt-get update')
-assert 'timeout --signal=TERM --kill-after=5 60' in u and '-C 100 -W 4' in u
+assert 'RuntimeMaxSec=60' in u and 'TimeoutStopSec=5' in u and '-C 100 -W 4' in u
+assert 'systemd-run' in u and 'test "$pid" = 0' in u and 'test "$status" = 0' in u
 assert 'OnCalendar=${ShutdownAtUtc}' in u and 'Persistent=true' in u
 assert 'https://archive.ubuntu.com/ubuntu' in u
 assert 'curl -k' not in u and 'trusted=yes' not in u and '--allow-unauthenticated' not in u
